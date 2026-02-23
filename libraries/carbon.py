@@ -22,7 +22,7 @@ class CarbonTracker:
     """
 
     def __init__(self, method_name="unnamed", power_watts=30.0,
-                 carbon_intensity_kg_kwh=0.45, use_codecarbon=True):
+                 carbon_intensity_kg_kwh=0.45, pue=1.0, use_codecarbon=True):
         """
         Args:
             method_name: label for this measurement
@@ -30,11 +30,15 @@ class CarbonTracker:
             carbon_intensity_kg_kwh: grid CO2 intensity in kg CO2/kWh
                 Default 0.45 ≈ US average.  Other values:
                   Arizona: ~0.42, EU avg: 0.213, France: ~0.07
+            pue: Power Usage Effectiveness — ratio of total facility power
+                to IT equipment power.  Default 1.0 (direct hardware only).
+                Typical data center: 1.1–1.6.  Google: ~1.1, Average: ~1.58.
             use_codecarbon: attempt to use CodeCarbon if installed
         """
         self.method_name = method_name
         self.power_watts = power_watts
         self.carbon_intensity = carbon_intensity_kg_kwh
+        self.pue = pue
         self.use_codecarbon = use_codecarbon
 
         self._codecarbon_tracker = None
@@ -56,7 +60,7 @@ class CarbonTracker:
         if self._has_codecarbon:
             from codecarbon import EmissionsTracker
             self._codecarbon_tracker = EmissionsTracker(
-                project_name=f"libaaraies-{self.method_name}",
+                project_name=f"libraries-{self.method_name}",
                 measure_power_secs=15,
                 log_level="error",
                 save_to_file=False,
@@ -79,8 +83,8 @@ class CarbonTracker:
                 energy_kwh = (self.power_watts * elapsed) / 3_600_000
             source = "codecarbon"
         else:
-            # Manual estimation
-            energy_kwh = (self.power_watts * elapsed) / 3_600_000
+            # Manual estimation: CO2 = Power × Time / 3,600,000 × CI × PUE
+            energy_kwh = (self.power_watts * elapsed) / 3_600_000 * self.pue
             emissions_kg = energy_kwh * self.carbon_intensity
             source = "manual"
 

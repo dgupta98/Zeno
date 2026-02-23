@@ -27,9 +27,9 @@ class LoRAAdapterVector(nn.Module):
         super().__init__()
         self.r = r
         self.alpha = alpha
-        # Init: B ~ N(0, σ²), a = 0 → ΔW = 0 at start
-        self.B = nn.Parameter(torch.randn(d, r) * 0.01)
-        self.a = nn.Parameter(torch.zeros(r))
+        # Hu et al. (2021) init: A ~ N(0, σ²), B = 0 → ΔW = BA = 0 at start
+        self.B = nn.Parameter(torch.zeros(d, r))
+        self.a = nn.Parameter(torch.randn(r) * 0.01)
         self.db = nn.Parameter(torch.zeros(1)) if train_bias else None
 
     def delta_w(self):
@@ -66,9 +66,9 @@ class LoRAAdapterMatrix(nn.Module):
         self.alpha = alpha
 
         # LoRA decomposition: ΔW = B @ A
-        # Init: B ~ N(0, σ²), A = 0 → ΔW = 0 at start
-        self.B = nn.Parameter(torch.randn(d, r) * 0.01)
-        self.A = nn.Parameter(torch.zeros(r, k))
+        # Hu et al. (2021) init: A ~ N(0, σ²), B = 0 → ΔW = BA = 0 at start
+        self.B = nn.Parameter(torch.zeros(d, r))
+        self.A = nn.Parameter(torch.randn(r, k) * 0.01)
         self.db = nn.Parameter(torch.zeros(k)) if train_bias else None
 
     def delta_W(self):

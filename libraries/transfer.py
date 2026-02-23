@@ -231,44 +231,94 @@ def bayesian_transfer_logistic(X_target, y_target, w_source, b_source,
 # ---------------------------------------------------------------------------
 
 def covariance_transfer_linear(X_source, y_source, X_target, y_target,
-                                eps=1e-6):
+                                blend=0.5, eps=1e-4):
     """
-    Analytical transfer using covariance structure.
+    Analytical transfer using covariance alignment with OLS blending.
 
-    Under covariate shift (P(y|x) preserved, P(x) differs), the
-    source weights can be transformed via the covariance ratio:
+    Under pure covariate shift (P(y|x) preserved, P(x) differs), source
+    weights can be transformed via the covariance ratio:
 
-        w_target ≈ Σ_xx_target^{-1} · Σ_xx_source · w_source
+        w_cov ≈ Σ_target^{-1} · Σ_source · w_source
 
-    This method:
-    1. Computes w_source via normal equation on source data
-    2. Transforms using covariance ratio between domains
+    In practice the assumption rarely holds perfectly, so this method
+    blends the covariance-corrected source weights with a direct OLS
+    solution on target data:
+
+        w_final = α · w_cov + (1 − α) · w_ols_target
+
+    If the covariance correction produces weights with extreme norms
+    (indicating violated assumptions), the method automatically reduces
+    trust in the correction and leans toward the target OLS solution.
 
     Args:
-        X_source, y_source: source domain data
+        X_source, y_source: source domain data (torch tensors)
         X_target, y_target: target domain data (can be small)
-        eps: regularization for matrix inversion
+        blend: base blending weight for covariance-corrected source.
+               0.0 = pure target OLS, 1.0 = pure covariance transfer.
+               Default 0.5 = equal blend.
+        eps: Tikhonov regularization for matrix inversion
 
     Returns:
         w_target: (d,) transferred weights
         b_target: (1,) bias adjusted for target domain
     """
     d = X_source.shape[1]
+    I = torch.eye(d)
+    reg = eps * I
+    n_s, n_t = X_source.shape[0], X_target.shape[0]
 
-    # Source: solve normal equation w_src = (X'X)^{-1} X'y
-    XsXs = X_source.T @ X_source + eps * torch.eye(d)
-    Xsy = X_source.T @ y_source
-    w_source = torch.linalg.solve(XsXs, Xsy)
+    # Helper: OLS with proper bias via augmented matrix
+    def _ols_with_bias(X, y, lam=eps):
+        n = X.shape[0]
+        ones = torch.ones(n, 1)
+        X_aug = torch.cat([X, ones], dim=1)
+        I_aug = torch.eye(d + 1) * lam
+        w_aug = torch.linalg.solve(X_aug.T @ X_aug + I_aug, X_aug.T @ y)
+        return w_aug[:d], w_aug[d:d+1]
 
-    # Covariance matrices
-    Sigma_source = X_source.T @ X_source / X_source.shape[0] + eps * torch.eye(d)
-    Sigma_target = X_target.T @ X_target / X_target.shape[0] + eps * torch.eye(d)
+    # 1. Source OLS (weights only, for covariance transform)
+    w_source = torch.linalg.solve(
+        X_source.T @ X_source + reg, X_source.T @ y_source
+    )
 
-    # Transform: w_target = Σ_target^{-1} · Σ_source · w_source
-    Sigma_ratio = torch.linalg.solve(Sigma_target, Sigma_source)
-    w_target = Sigma_ratio @ w_source
+    # 2. Target OLS with proper bias handling
+    w_ols_target, b_ols_target = _ols_with_bias(X_target, y_target)
 
-    # Adjust bias for target domain means
-    b_target = torch.mean(y_target) - X_target.mean(dim=0) @ w_target
+    # 3. Covariance ratio transform: w_cov = Σ_t^{-1} · Σ_s · w_src
+    Sigma_s = X_source.T @ X_source / n_s + reg
+    Sigma_t = X_target.T @ X_target / n_t + reg
+    w_cov = torch.linalg.solve(Sigma_t, Sigma_s @ w_source)
 
-    return w_target, b_target.unsqueeze(0)
+    # 4. Adaptive blending — detect when covariance shift assumption fails
+    #    Two checks: (a) norm ratio, (b) cosine similarity of directions.
+    norm_cov = torch.norm(w_cov).item()
+    norm_ols = torch.norm(w_ols_target).item() + 1e-8
+    norm_ratio = norm_cov / norm_ols
+
+    # Cosine similarity: do the two solutions point the same direction?
+    cos_sim = (torch.dot(w_cov, w_ols_target)
+               / (torch.norm(w_cov) * torch.norm(w_ols_target) + 1e-8)).item()
+
+    if norm_ratio > 10.0 or norm_ratio < 0.1 or cos_sim < 0.0:
+        # Extreme divergence or opposite directions — covariance
+        # transfer is unreliable, return pure target OLS (safest)
+        effective_blend = 0.0
+    elif norm_ratio > 3.0 or norm_ratio < 0.33 or cos_sim < 0.5:
+        # Moderate divergence — small covariance contribution
+        effective_blend = blend * 0.15
+    else:
+        effective_blend = blend
+
+    w_target = effective_blend * w_cov + (1 - effective_blend) * w_ols_target
+    b_target = b_ols_target  # always use properly estimated bias
+
+    # 5. Safety net: if blended weights are worse than pure target OLS
+    #    on training data, fall back entirely to the OLS solution.
+    pred_blend = X_target @ w_target + b_target
+    pred_ols = X_target @ w_ols_target + b_ols_target
+    mse_blend = torch.mean((pred_blend - y_target) ** 2).item()
+    mse_ols = torch.mean((pred_ols - y_target) ** 2).item()
+    if mse_blend > mse_ols * 1.05:  # >5% worse → fall back
+        w_target = w_ols_target
+
+    return w_target, b_target

@@ -257,3 +257,82 @@ def should_transfer(X_source, X_target, mmd_threshold=0.5, pad_threshold=1.5,
         "ks_detail": ks_result,
         "reasons": reasons,
     }
+
+
+# ---------------------------------------------------------------------------
+# Validation-Based Source Selection
+# ---------------------------------------------------------------------------
+
+def validate_transfer(X_target_train, y_target_train,
+                      train_fn, transfer_fn, scratch_fn,
+                      val_frac=0.2, seed=42, metric_fn=None,
+                      higher_is_better=True):
+    """
+    Empirically verify whether transfer helps on held-out target data.
+
+    Splits the target training data into a sub-train and validation set,
+    runs both transfer and scratch approaches, and compares metrics on
+    the validation portion.  This is the most reliable (but most expensive)
+    negative transfer prevention strategy.
+
+    Ref: Tian & Feng (2022, JASA) — transferable source detection.
+
+    Args:
+        X_target_train: (n, d) target training features (numpy)
+        y_target_train: (n,) target training labels (numpy)
+        train_fn: callable(X, y) → (w, b) for scratch training
+        transfer_fn: callable(X, y) → (w, b) for transfer training
+        scratch_fn: callable(X, y) → (w, b) for from-scratch (baseline)
+        val_frac: fraction of target data held out for validation
+        seed: random seed for the split
+        metric_fn: callable(y_pred, y_true) → float, evaluation metric.
+                   If None, uses MSE (lower is better).
+        higher_is_better: True if higher metric = better model
+
+    Returns:
+        dict with:
+          - use_transfer: bool, True if transfer beats scratch
+          - transfer_score: float, transfer model's validation score
+          - scratch_score: float, scratch model's validation score
+          - improvement: float, relative improvement (positive = transfer helps)
+    """
+    rng = np.random.RandomState(seed)
+    n = len(X_target_train)
+    n_val = max(5, int(val_frac * n))
+    idx = rng.permutation(n)
+    val_idx, train_idx = idx[:n_val], idx[n_val:]
+
+    X_sub = X_target_train[train_idx]
+    y_sub = y_target_train[train_idx]
+    X_val = X_target_train[val_idx]
+    y_val = y_target_train[val_idx]
+
+    # Default metric: negative MSE (so higher = better)
+    if metric_fn is None:
+        def metric_fn(y_pred, y_true):
+            return -float(np.mean((y_pred - y_true) ** 2))
+        higher_is_better = True
+
+    # Train both
+    w_tr, b_tr = transfer_fn(X_sub, y_sub)
+    w_sc, b_sc = scratch_fn(X_sub, y_sub)
+
+    # Evaluate
+    y_pred_tr = X_val @ _to_numpy(w_tr) + _to_numpy(b_tr)
+    y_pred_sc = X_val @ _to_numpy(w_sc) + _to_numpy(b_sc)
+    score_tr = metric_fn(y_pred_tr, y_val)
+    score_sc = metric_fn(y_pred_sc, y_val)
+
+    if higher_is_better:
+        use_transfer = score_tr >= score_sc
+        improvement = (score_tr - score_sc) / (abs(score_sc) + 1e-12)
+    else:
+        use_transfer = score_tr <= score_sc
+        improvement = (score_sc - score_tr) / (abs(score_sc) + 1e-12)
+
+    return {
+        "use_transfer": use_transfer,
+        "transfer_score": float(score_tr),
+        "scratch_score": float(score_sc),
+        "improvement": float(improvement),
+    }
