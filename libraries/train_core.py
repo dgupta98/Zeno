@@ -39,7 +39,8 @@ def _should_log(epoch, total_epochs):
 
 
 def fit_linear_sgd(X, y, w_init, b_init, epochs=10, lr=0.01,
-                   clip_grad=5.0, batch_size=64, verbose=False, label=None):
+                   clip_grad=5.0, batch_size=64, verbose=False, label=None,
+                   weight_decay=0.0):
     """
     Train a linear regression model via mini-batch SGD.
 
@@ -62,6 +63,8 @@ def fit_linear_sgd(X, y, w_init, b_init, epochs=10, lr=0.01,
                     for full-batch gradient descent.
         verbose: if True, print per-epoch progress (loss)
         label: optional name printed in progress header (e.g. "Source")
+        weight_decay: L2 regularization strength (default 0). Helps
+                      prevent overfitting on small datasets.
 
     Returns:
         w: (d,) trained weights (detached)
@@ -69,7 +72,7 @@ def fit_linear_sgd(X, y, w_init, b_init, epochs=10, lr=0.01,
     """
     w = nn.Parameter(w_init.clone())
     b = nn.Parameter(b_init.clone())
-    opt = optim.SGD([w, b], lr=lr)
+    opt = optim.SGD([w, b], lr=lr, weight_decay=weight_decay)
     n = X.shape[0]
 
     # Full-batch mode
@@ -126,7 +129,8 @@ def fit_linear_sgd(X, y, w_init, b_init, epochs=10, lr=0.01,
 
 
 def fit_logistic_sgd(X, y, w_init, b_init, epochs=10, lr=0.01,
-                     clip_grad=5.0, batch_size=64, verbose=False, label=None):
+                     clip_grad=5.0, batch_size=64, verbose=False, label=None,
+                     weight_decay=0.0):
     """
     Train a logistic regression model via mini-batch SGD.
 
@@ -150,6 +154,8 @@ def fit_logistic_sgd(X, y, w_init, b_init, epochs=10, lr=0.01,
                     for full-batch gradient descent.
         verbose: if True, print per-epoch progress (loss)
         label: optional name printed in progress header (e.g. "Source")
+        weight_decay: L2 regularization strength (default 0). Helps
+                      prevent overfitting on small datasets.
 
     Returns:
         w: (d,) trained weights (detached)
@@ -157,7 +163,7 @@ def fit_logistic_sgd(X, y, w_init, b_init, epochs=10, lr=0.01,
     """
     w = nn.Parameter(w_init.clone())
     b = nn.Parameter(b_init.clone())
-    opt = optim.SGD([w, b], lr=lr)
+    opt = optim.SGD([w, b], lr=lr, weight_decay=weight_decay)
     loss_fn = nn.BCEWithLogitsLoss()
     n = X.shape[0]
 

@@ -234,11 +234,74 @@ def load_wine_linear(seed=0, test_frac=0.25):
     tgt_train, tgt_test = tgt_df.iloc[tgt_tr_idx], tgt_df.iloc[tgt_te_idx]
 
     union_train = pd.concat([src_train, tgt_train], axis=0)
-    sc = StandardScaler().fit(union_train[feature_cols].to_numpy())
+    sc_x = StandardScaler().fit(union_train[feature_cols].to_numpy())
+    sc_y = StandardScaler().fit(
+        union_train[target_col].to_numpy().reshape(-1, 1))
 
     def xy(split):
-        X = sc.transform(split[feature_cols].to_numpy()).astype(np.float32)
-        y = split[target_col].to_numpy().astype(np.float32)
+        X = sc_x.transform(split[feature_cols].to_numpy()).astype(np.float32)
+        y = sc_y.transform(
+            split[target_col].to_numpy().reshape(-1, 1)
+        ).ravel().astype(np.float32)
+        return X, y
+
+    Xs_tr, ys_tr = xy(src_train)
+    Xs_te, ys_te = xy(src_test)
+    Xt_tr, yt_tr = xy(tgt_train)
+    Xt_te, yt_te = xy(tgt_test)
+
+    return (Xs_tr, ys_tr, Xs_te, ys_te), (Xt_tr, yt_tr, Xt_te, yt_te)
+
+
+def load_iris_linear(seed=0, test_frac=0.25):
+    """
+    Iris — linear regression (predict petal length from other features).
+
+    Domain split by species: source = setosa + versicolor (classes 0,1),
+    target = virginica (class 2).  This creates a genuine covariate shift
+    because virginica has larger petals, sepals, and different proportions.
+
+    We use sepal_length, sepal_width, petal_width as features (3-d)
+    and petal_length as the regression target.
+
+    150 samples total → ~100 source, ~50 target.
+    """
+    from sklearn.datasets import load_iris
+    from sklearn.preprocessing import StandardScaler
+
+    data = load_iris(as_frame=True)
+    df = data.frame.copy()
+    # sklearn names: sepal length (cm), sepal width (cm),
+    # petal length (cm), petal width (cm), target (species 0/1/2)
+
+    target_col = "petal length (cm)"
+    species_col = "target"
+    feature_cols = [c for c in df.columns
+                    if c not in (target_col, species_col)]
+
+    # Domain split: source = setosa(0) + versicolor(1),  target = virginica(2)
+    src_df = df[df[species_col].isin([0, 1])].copy()
+    tgt_df = df[df[species_col] == 2].copy()
+
+    src_tr_idx, src_te_idx = _train_test_split_idx(
+        len(src_df), test_frac=test_frac, seed=seed)
+    tgt_tr_idx, tgt_te_idx = _train_test_split_idx(
+        len(tgt_df), test_frac=test_frac, seed=seed + 1)
+
+    src_train, src_test = src_df.iloc[src_tr_idx], src_df.iloc[src_te_idx]
+    tgt_train, tgt_test = tgt_df.iloc[tgt_tr_idx], tgt_df.iloc[tgt_te_idx]
+
+    # Shared StandardScaler fit on union of training sets
+    union_train = pd.concat([src_train, tgt_train], axis=0)
+    sc_x = StandardScaler().fit(union_train[feature_cols].to_numpy())
+    sc_y = StandardScaler().fit(
+        union_train[target_col].to_numpy().reshape(-1, 1))
+
+    def xy(split):
+        X = sc_x.transform(split[feature_cols].to_numpy()).astype(np.float32)
+        y = sc_y.transform(
+            split[target_col].to_numpy().reshape(-1, 1)
+        ).ravel().astype(np.float32)
         return X, y
 
     Xs_tr, ys_tr = xy(src_train)
@@ -284,11 +347,15 @@ def load_california_housing_linear(seed=0, test_frac=0.25):
 
     # Shared scaler fit on union of training data
     union_train = pd.concat([src_train, tgt_train], axis=0)
-    sc = StandardScaler().fit(union_train[feature_cols].to_numpy())
+    sc_x = StandardScaler().fit(union_train[feature_cols].to_numpy())
+    sc_y = StandardScaler().fit(
+        union_train[target_col].to_numpy().reshape(-1, 1))
 
     def xy(split):
-        X = sc.transform(split[feature_cols].to_numpy()).astype(np.float32)
-        y = split[target_col].to_numpy().astype(np.float32)
+        X = sc_x.transform(split[feature_cols].to_numpy()).astype(np.float32)
+        y = sc_y.transform(
+            split[target_col].to_numpy().reshape(-1, 1)
+        ).ravel().astype(np.float32)
         return X, y
 
     Xs_tr, ys_tr = xy(src_train)

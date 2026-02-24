@@ -335,11 +335,18 @@ def covariance_transfer_linear(X_source, y_source, X_target, y_target,
     """
     d = X_source.shape[1]
     I = torch.eye(d)
-    reg = eps * I
     n_s, n_t = X_source.shape[0], X_target.shape[0]
 
+    # Adaptive regularization: when n_target is small relative to d,
+    # covariance estimates are noisy and need stronger regularization.
+    effective_eps = eps
+    if n_t < 5 * d:
+        effective_eps = max(eps, 0.1 * d / max(n_t, 1))
+
+    reg = effective_eps * I
+
     # Helper: OLS with proper bias via augmented matrix
-    def _ols_with_bias(X, y, lam=eps):
+    def _ols_with_bias(X, y, lam=effective_eps):
         n = X.shape[0]
         ones = torch.ones(n, 1)
         X_aug = torch.cat([X, ones], dim=1)
@@ -389,7 +396,8 @@ def covariance_transfer_linear(X_source, y_source, X_target, y_target,
     pred_ols = X_target @ w_ols_target + b_ols_target
     mse_blend = torch.mean((pred_blend - y_target) ** 2).item()
     mse_ols = torch.mean((pred_ols - y_target) ** 2).item()
-    if mse_blend > mse_ols * 1.05:  # >5% worse -> fall back
+    if mse_blend > mse_ols * 1.01:  # >1% worse -> fall back
         w_target = w_ols_target
+        b_target = b_ols_target
 
     return w_target, b_target
