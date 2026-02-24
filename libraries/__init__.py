@@ -49,11 +49,5 @@ from .metrics import (
     set_seed,
 )
 from .carbon import CarbonTracker, compare_emissions
-from .real_datasets import (
-    load_california_housing_linear,
-    load_wine_linear,
-    load_titanic_logistic,
-    load_breast_cancer_logistic,
-)
 
 __version__ = "0.3.0"

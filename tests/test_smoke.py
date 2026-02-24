@@ -60,7 +60,7 @@ class TestTrainCore:
         from libraries.metrics import r2_score
         X, y, d = linear_data
         w, b = fit_linear_sgd(X, y, torch.zeros(d), torch.zeros(1),
-                              steps=200, lr=0.01)
+                              epochs=50, lr=0.01)
         yhat = X @ w + b
         r2 = r2_score(yhat, y)
         assert r2 > 0.9, f"Linear SGD R²={r2:.4f}, expected > 0.9"
@@ -70,7 +70,7 @@ class TestTrainCore:
         from libraries.metrics import accuracy_from_logits
         X, y, d = logistic_data
         w, b = fit_logistic_sgd(X, y, torch.zeros(d), torch.zeros(1),
-                                steps=200, lr=0.1)
+                                epochs=50, lr=0.1)
         logits = X @ w + b
         acc = accuracy_from_logits(logits, y)
         assert acc > 0.85, f"Logistic SGD acc={acc:.4f}, expected > 0.85"
@@ -82,16 +82,16 @@ class TestTrainCore:
         X, y, d = linear_data
         # Full training
         w_full, b_full = fit_linear_sgd(X, y, torch.zeros(d), torch.zeros(1),
-                                        steps=200, lr=0.01)
-        # Cold start with few steps
+                                        epochs=50, lr=0.01)
+        # Cold start with few epochs
         w_cold, b_cold = fit_linear_sgd(X, y, torch.zeros(d), torch.zeros(1),
-                                        steps=20, lr=0.01)
-        # Warm start from full solution with few steps
+                                        epochs=5, lr=0.01)
+        # Warm start from full solution with few epochs
         w_warm, b_warm = fit_linear_sgd(X, y, w_full.clone(), b_full.clone(),
-                                        steps=20, lr=0.01)
+                                        epochs=5, lr=0.01)
         mse_cold = mse(X @ w_cold + b_cold, y)
         mse_warm = mse(X @ w_warm + b_warm, y)
-        assert mse_warm < mse_cold, "Warm start should beat cold start in 20 steps"
+        assert mse_warm < mse_cold, "Warm start should beat cold start in 5 epochs"
 
 
 # ---------- Transfer Methods ----------
@@ -103,7 +103,7 @@ class TestTransfer:
         from libraries.metrics import r2_score
         X_s, y_s, X_t, y_t, d = source_target_data
         w_src, b_src = fit_linear_sgd(X_s, y_s, torch.zeros(d), torch.zeros(1),
-                                      steps=200, lr=0.01)
+                                      epochs=50, lr=0.01)
         w, b = regularized_transfer_linear(X_t, y_t, w_src, b_src, lam=1.0)
         r2 = r2_score(X_t @ w + b, y_t)
         assert r2 > 0.8, f"Regularized transfer R²={r2:.4f}, expected > 0.8"
@@ -114,7 +114,7 @@ class TestTransfer:
         from libraries.metrics import r2_score
         X_s, y_s, X_t, y_t, d = source_target_data
         w_src, b_src = fit_linear_sgd(X_s, y_s, torch.zeros(d), torch.zeros(1),
-                                      steps=200, lr=0.01)
+                                      epochs=50, lr=0.01)
         w, b = bayesian_transfer_linear(X_t, y_t, w_src, b_src)
         r2 = r2_score(X_t @ w + b, y_t)
         assert r2 > 0.8, f"Bayesian transfer R²={r2:.4f}, expected > 0.8"
@@ -143,9 +143,9 @@ class TestTransfer:
         X_t_t, y_t_t = torch.from_numpy(X_t), torch.from_numpy(y_t)
 
         w_src, b_src = fit_logistic_sgd(X_s_t, y_s_t, torch.zeros(d),
-                                        torch.zeros(1), steps=200, lr=0.1)
+                                        torch.zeros(1), epochs=50, lr=0.1)
         w, b = regularized_transfer_logistic(X_t_t, y_t_t, w_src, b_src,
-                                             steps=100, lr=0.01)
+                                             epochs=25, lr=0.01)
         acc = accuracy_from_logits(X_t_t @ w + b, y_t_t)
         assert acc > 0.8, f"Regularized logistic acc={acc:.4f}, expected > 0.8"
 
@@ -333,9 +333,7 @@ class TestPackage:
             "should_transfer", "validate_transfer",
             "moment_init_linear", "moment_init_logistic",
             "mse", "r2_score", "accuracy_from_logits", "estimate_energy_and_co2",
-            "CarbonTracker",
-            "load_california_housing_linear", "load_wine_linear",
-            "load_titanic_logistic", "load_breast_cancer_logistic",
+            "CarbonTracker", "compare_emissions", "set_seed",
         ]
         for name in expected:
             assert hasattr(libraries, name), f"Missing export: {name}"

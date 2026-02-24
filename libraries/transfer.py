@@ -12,6 +12,8 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 
+from .train_core import _should_log
+
 
 # ---------------------------------------------------------------------------
 # 1. Regularized Transfer
@@ -21,12 +23,12 @@ def regularized_transfer_linear(X_target, y_target, w_source, b_source, lam=1.0)
     """
     Closed-form regularized transfer for linear regression.
 
-    Solves:  w* = (X'X + λI)^{-1} (X'y + λ·w_source)
+    Solves:  w* = (X'X + lambda I)^{-1} (X'y + lambda w_source)
 
     This is Ridge regression with the penalty centered on w_source
-    instead of zero.  λ controls trust in the source model:
-      - large λ → heavy reliance on source weights
-      - small λ → effectively trains from scratch
+    instead of zero.  lambda controls trust in the source model:
+      - large lambda -> heavy reliance on source weights
+      - small lambda -> effectively trains from scratch
 
     Args:
         X_target: (n, d) target features (torch tensor)
@@ -51,7 +53,7 @@ def regularized_transfer_linear(X_target, y_target, w_source, b_source, lam=1.0)
     Xty = X_aug.T @ y_target  # (d+1,)
     I = torch.eye(d + 1)
 
-    # Closed-form: w* = (X'X + λI)^{-1} (X'y + λ·w_source)
+    # Closed-form: w* = (X'X + lambda I)^{-1} (X'y + lambda w_source)
     A = XtX + lam * I
     b = Xty + lam * w_source_aug
     w_aug = torch.linalg.solve(A, b)
@@ -60,11 +62,12 @@ def regularized_transfer_linear(X_target, y_target, w_source, b_source, lam=1.0)
 
 
 def regularized_transfer_logistic(X_target, y_target, w_source, b_source,
-                                   lam=1.0, steps=100, lr=0.01):
+                                   lam=1.0, epochs=10, lr=0.01, batch_size=64,
+                                   verbose=False, label=None):
     """
     Gradient-based regularized transfer for logistic regression.
 
-    Minimizes: L(w) = BCE(w) + λ·||w - w_source||²
+    Minimizes: L(w) = BCE(w) + lambda ||w - w_source||^2
 
     The regularization term pulls weights toward the source model
     rather than toward zero.
@@ -75,8 +78,11 @@ def regularized_transfer_logistic(X_target, y_target, w_source, b_source,
         w_source: (d,) source model weights
         b_source: (1,) source model bias
         lam: regularization strength
-        steps: gradient descent iterations
+        epochs: training epochs
         lr: learning rate (typically 10x smaller than from-scratch)
+        batch_size: mini-batch size (None for full-batch)
+        verbose: if True, print per-epoch progress
+        label: optional name printed in progress header
 
     Returns:
         w_target, b_target: optimized weights and bias
@@ -85,20 +91,50 @@ def regularized_transfer_logistic(X_target, y_target, w_source, b_source,
     b = nn.Parameter(b_source.clone())
     opt = optim.SGD([w, b], lr=lr)
     bce = nn.BCEWithLogitsLoss()
+    n = X_target.shape[0]
 
     w_src_detached = w_source.detach()
     b_src_detached = b_source.detach()
 
-    for _ in range(steps):
-        opt.zero_grad()
-        logits = X_target @ w + b
-        data_loss = bce(logits, y_target)
-        # L2 penalty pulling toward source weights
-        reg_loss = lam * (torch.sum((w - w_src_detached) ** 2)
-                          + torch.sum((b - b_src_detached) ** 2))
-        loss = data_loss + reg_loss
-        loss.backward()
-        opt.step()
+    use_minibatch = batch_size is not None and 0 < batch_size < n
+    n_batches = ((n + batch_size - 1) // batch_size) if use_minibatch else 1
+    total_steps = epochs * n_batches
+
+    if verbose:
+        tag = f" ({label})" if label else ""
+        mode = f"{n_batches} batches" if use_minibatch else "full-batch"
+        print(f"      {epochs} epochs x {mode} = {total_steps} steps{tag}")
+
+    for epoch in range(epochs):
+        epoch_loss = 0.0
+        if use_minibatch:
+            perm = torch.randperm(n)
+            for i in range(0, n, batch_size):
+                idx = perm[i:i + batch_size]
+                opt.zero_grad()
+                logits = X_target[idx] @ w + b
+                data_loss = bce(logits, y_target[idx])
+                reg_loss = lam * (torch.sum((w - w_src_detached) ** 2)
+                                  + torch.sum((b - b_src_detached) ** 2))
+                loss = data_loss + reg_loss
+                loss.backward()
+                opt.step()
+                epoch_loss += loss.item()
+        else:
+            opt.zero_grad()
+            logits = X_target @ w + b
+            data_loss = bce(logits, y_target)
+            reg_loss = lam * (torch.sum((w - w_src_detached) ** 2)
+                              + torch.sum((b - b_src_detached) ** 2))
+            loss = data_loss + reg_loss
+            loss.backward()
+            opt.step()
+            epoch_loss = loss.item()
+
+        if verbose and _should_log(epoch, epochs):
+            avg_loss = epoch_loss / n_batches
+            print(f"      epoch {epoch+1:>{len(str(epochs))}}/{epochs}  "
+                  f"[{n_batches} batches]  loss={avg_loss:.4f}")
 
     return w.detach(), b.detach()
 
@@ -115,11 +151,11 @@ def bayesian_transfer_linear(X_target, y_target, w_source, b_source,
     Uses the source model's posterior as the target model's prior.
     The posterior mean is a precision-weighted average:
 
-        Λ_n = Λ_0 + (1/σ²)·X'X
-        μ_n = Λ_n^{-1} (Λ_0·μ_0 + (1/σ²)·X'y)
+        Lambda_n = Lambda_0 + (1/sigma^2) X'X
+        mu_n = Lambda_n^{-1} (Lambda_0 mu_0 + (1/sigma^2) X'y)
 
-    where Λ_0 = source_precision · I (prior precision from source)
-    and μ_0 = w_source (prior mean from source).
+    where Lambda_0 = source_precision I (prior precision from source)
+    and mu_0 = w_source (prior mean from source).
 
     The model automatically balances source knowledge against new data
     based on their relative precision.  With little target data,
@@ -132,7 +168,7 @@ def bayesian_transfer_linear(X_target, y_target, w_source, b_source,
         w_source: (d,) source posterior mean
         b_source: (1,) source bias
         source_precision: scalar confidence in source (higher = more trust)
-        noise_var: observation noise variance σ²
+        noise_var: observation noise variance sigma^2
 
     Returns:
         w_posterior: (d,) posterior mean weights
@@ -176,14 +212,15 @@ def bayesian_posterior_precision(X_target, source_precision=1.0, noise_var=1.0):
 
 
 def bayesian_transfer_logistic(X_target, y_target, w_source, b_source,
-                                source_precision=1.0, steps=100, lr=0.01):
+                                source_precision=1.0, epochs=10, lr=0.01,
+                                batch_size=64, verbose=False, label=None):
     """
     Bayesian-inspired transfer for logistic regression via Laplace approximation.
 
     No closed-form exists for logistic, so we use a Bayesian-inspired approach:
     1. Use source weights as the MAP prior mean
     2. Use source_precision to set a Gaussian prior N(w_source, (1/precision)*I)
-    3. Optimize the MAP objective: -log p(y|X,w) - (precision/2)||w - w_source||²
+    3. Optimize the MAP objective: -log p(y|X,w) - (precision/2)||w - w_source||^2
 
     This is equivalent to regularized transfer but framed as MAP estimation
     under a Gaussian prior centered on the source posterior.  The precision
@@ -196,8 +233,11 @@ def bayesian_transfer_logistic(X_target, y_target, w_source, b_source,
         w_source: (d,) source posterior mean
         b_source: (1,) source bias
         source_precision: prior precision (higher = more trust in source)
-        steps: optimization iterations
+        epochs: training epochs
         lr: learning rate
+        batch_size: mini-batch size (None for full-batch)
+        verbose: if True, print per-epoch progress
+        label: optional name printed in progress header
 
     Returns:
         w_map: (d,) MAP estimate weights
@@ -207,21 +247,52 @@ def bayesian_transfer_logistic(X_target, y_target, w_source, b_source,
     b = nn.Parameter(b_source.clone())
     opt = optim.SGD([w, b], lr=lr)
     bce = nn.BCEWithLogitsLoss()
+    n = X_target.shape[0]
 
     w_prior = w_source.detach()
     b_prior = b_source.detach()
 
-    for _ in range(steps):
-        opt.zero_grad()
-        logits = X_target @ w + b
-        nll = bce(logits, y_target)
-        # Gaussian prior: -log p(w) = (precision/2) * ||w - w_source||²
-        prior_loss = (source_precision / 2.0) * (
-            torch.sum((w - w_prior) ** 2) + torch.sum((b - b_prior) ** 2)
-        )
-        loss = nll + prior_loss
-        loss.backward()
-        opt.step()
+    use_minibatch = batch_size is not None and 0 < batch_size < n
+    n_batches = ((n + batch_size - 1) // batch_size) if use_minibatch else 1
+    total_steps = epochs * n_batches
+
+    if verbose:
+        tag = f" ({label})" if label else ""
+        mode = f"{n_batches} batches" if use_minibatch else "full-batch"
+        print(f"      {epochs} epochs x {mode} = {total_steps} steps{tag}")
+
+    for epoch in range(epochs):
+        epoch_loss = 0.0
+        if use_minibatch:
+            perm = torch.randperm(n)
+            for i in range(0, n, batch_size):
+                idx = perm[i:i + batch_size]
+                opt.zero_grad()
+                logits = X_target[idx] @ w + b
+                nll = bce(logits, y_target[idx])
+                prior_loss = (source_precision / 2.0) * (
+                    torch.sum((w - w_prior) ** 2) + torch.sum((b - b_prior) ** 2)
+                )
+                loss = nll + prior_loss
+                loss.backward()
+                opt.step()
+                epoch_loss += loss.item()
+        else:
+            opt.zero_grad()
+            logits = X_target @ w + b
+            nll = bce(logits, y_target)
+            prior_loss = (source_precision / 2.0) * (
+                torch.sum((w - w_prior) ** 2) + torch.sum((b - b_prior) ** 2)
+            )
+            loss = nll + prior_loss
+            loss.backward()
+            opt.step()
+            epoch_loss = loss.item()
+
+        if verbose and _should_log(epoch, epochs):
+            avg_loss = epoch_loss / n_batches
+            print(f"      epoch {epoch+1:>{len(str(epochs))}}/{epochs}  "
+                  f"[{n_batches} batches]  loss={avg_loss:.4f}")
 
     return w.detach(), b.detach()
 
@@ -238,13 +309,13 @@ def covariance_transfer_linear(X_source, y_source, X_target, y_target,
     Under pure covariate shift (P(y|x) preserved, P(x) differs), source
     weights can be transformed via the covariance ratio:
 
-        w_cov ≈ Σ_target^{-1} · Σ_source · w_source
+        w_cov = Sigma_target^{-1} Sigma_source w_source
 
     In practice the assumption rarely holds perfectly, so this method
     blends the covariance-corrected source weights with a direct OLS
     solution on target data:
 
-        w_final = α · w_cov + (1 − α) · w_ols_target
+        w_final = alpha w_cov + (1 - alpha) w_ols_target
 
     If the covariance correction produces weights with extreme norms
     (indicating violated assumptions), the method automatically reduces
@@ -284,7 +355,7 @@ def covariance_transfer_linear(X_source, y_source, X_target, y_target,
     # 2. Target OLS with proper bias handling
     w_ols_target, b_ols_target = _ols_with_bias(X_target, y_target)
 
-    # 3. Covariance ratio transform: w_cov = Σ_t^{-1} · Σ_s · w_src
+    # 3. Covariance ratio transform: w_cov = Sigma_t^{-1} Sigma_s w_src
     Sigma_s = X_source.T @ X_source / n_s + reg
     Sigma_t = X_target.T @ X_target / n_t + reg
     w_cov = torch.linalg.solve(Sigma_t, Sigma_s @ w_source)
@@ -318,7 +389,7 @@ def covariance_transfer_linear(X_source, y_source, X_target, y_target,
     pred_ols = X_target @ w_ols_target + b_ols_target
     mse_blend = torch.mean((pred_blend - y_target) ** 2).item()
     mse_ols = torch.mean((pred_ols - y_target) ** 2).item()
-    if mse_blend > mse_ols * 1.05:  # >5% worse → fall back
+    if mse_blend > mse_ols * 1.05:  # >5% worse -> fall back
         w_target = w_ols_target
 
     return w_target, b_target

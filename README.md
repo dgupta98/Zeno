@@ -17,7 +17,7 @@
 
 ## Why This Project?
 
-Every model trained from scratch costs energy and emits CO2. **libraries** demonstrates that the same transfer learning techniques powering modern deep learning — weight transfer, LoRA, Bayesian priors — work remarkably well on classical linear and logistic regression, achieving **85-99% CO2 reduction** compared to full training while **matching or beating scratch performance in 20 out of 22 method-dataset evaluations**.
+Every model trained from scratch costs energy and emits CO2. **libraries** demonstrates that the same transfer learning techniques powering modern deep learning — weight transfer, LoRA, Bayesian priors — work remarkably well on classical linear and logistic regression, achieving **85-99% CO2 reduction** compared to full training while **matching or beating scratch performance in 19 out of 22 method-dataset evaluations**.
 
 > *"Efficient AI is inclusive AI. When AI requires less computation, more people can build it."*
 
@@ -33,12 +33,12 @@ Built entirely from scratch in PyTorch (no sklearn models) for the **ASU Princip
   <img src="figures/convergence_curves.png" width="90%" alt="Convergence speed: transfer vs scratch training">
 </p>
 
-Transfer learning reaches the same performance as 500-step scratch training in **just 5-100 steps** — a 5-100x computational speedup.
+Transfer learning reaches the same performance as 30-epoch scratch training in **just 1 epoch** — up to a 30x computational speedup.
 
-| Dataset | Steps to Match Scratch-500 | Speedup |
+| Dataset | Epochs to Match Scratch-30 | Speedup |
 |---------|---------------------------|---------|
-| CA Housing (regression) | ~100 steps | **5x faster** |
-| Titanic (classification) | ~5 steps | **100x faster** |
+| CA Housing (regression) | ~1 epoch | **30x faster** |
+| Titanic (classification) | ~1 epoch | **30x faster** |
 
 ### Performance Across 4 Datasets
 
@@ -50,10 +50,10 @@ Transfer learning reaches the same performance as 500-step scratch training in *
 |---------|---------------------|-------|-------------------|-----------|
 | CA Housing | Regularized | R2=0.58 | BEATS FULL | 99% |
 | Wine Quality | Regularized | R2=0.26 | BEATS FULL | 99% |
-| Titanic | Stat Mapping | Acc=79.2% | BEATS FULL | 90% |
-| Breast Cancer | Weight Transfer | Acc=91.6% | ~MATCHES | 91% |
+| Titanic | Stat Mapping | Acc=79.2% | BEATS FULL | 88% |
+| Breast Cancer | Weight Transfer | Acc=88.7% | ~MATCHES | 90% |
 
-**20/22 method-dataset pairs match or beat full scratch training.**
+**19/22 method-dataset pairs match or beat full scratch training** (14 BEATS FULL, 5 ~MATCHES).
 
 ### Efficiency Frontier: Better Performance at Lower Cost
 
@@ -78,8 +78,8 @@ Transfer methods consistently occupy the **upper-left quadrant** (high performan
 | **5 Transfer Methods** | Regularized weight transfer, LoRA adaptation, Bayesian prior transfer, Covariance-based analytical transfer, Statistical moment mapping |
 | **3 Negative Transfer Detectors** | Maximum Mean Discrepancy (MMD), Proxy A-distance (PAD), Feature-wise Kolmogorov-Smirnov tests |
 | **CO2 Tracking** | Integrated carbon emissions estimation (with optional [CodeCarbon](https://github.com/mlco2/codecarbon) support) |
-| **4 Real-World Datasets** | California Housing, Wine Quality, Titanic, Breast Cancer — with principled domain-split loaders |
-| **Convergence Analysis** | Step-by-step comparison showing transfer converges 5-100x faster |
+| **4 Real-World Datasets** | California Housing, Wine Quality, Titanic, Breast Cancer — with principled domain-split loaders (in `tests/`) |
+| **Convergence Analysis** | Epoch-by-epoch comparison showing transfer converges up to 30x faster |
 | **26 Smoke Tests** | Full pytest suite covering every module |
 | **pip-installable** | `pyproject.toml` with optional dependencies |
 
@@ -90,16 +90,16 @@ Transfer methods consistently occupy the **upper-left quadrant** (high performan
 ```
 libraries/
 ├── libraries/                # Core library (from-scratch PyTorch, no sklearn models)
-│   ├── __init__.py            # Public API (30+ exports) & version
-│   ├── train_core.py          # SGD training with gradient clipping
+│   ├── __init__.py            # Public API (25+ exports) & version
+│   ├── train_core.py          # Mini-batch SGD training with gradient clipping
 │   ├── transfer.py            # Regularized, Bayesian & Covariance transfer
 │   ├── adapters.py            # LoRA adapters (vector & matrix, Hu et al. 2021 init)
 │   ├── stat_mapping.py        # Statistical moment-based weight initialization
 │   ├── negative_transfer.py   # MMD, PAD, KS detection + validate_transfer
 │   ├── metrics.py             # MSE, R2, accuracy, energy estimation, set_seed
-│   ├── carbon.py              # CarbonTracker with PUE support
-│   └── real_datasets.py       # Domain-split loaders for 4 datasets
+│   └── carbon.py              # CarbonTracker with PUE support
 ├── tests/
+│   ├── real_datasets.py       # Domain-split loaders for 4 datasets (demo support)
 │   ├── run_full_demo.py       # Full benchmark with convergence analysis & plots
 │   └── test_smoke.py          # 26 pytest smoke tests
 ├── figures/                   # 6 auto-generated publication-quality plots
@@ -117,9 +117,9 @@ libraries/
 # Clone and install
 git clone https://github.com/dgupta98/Zeno.git
 cd Zeno
-pip install -e ".[all]"    # installs with visualization + carbon tracking
+pip install -e ".[all]"    # installs with datasets, visualization + carbon tracking
 
-# Or install just the core
+# Or install just the core (torch, numpy, scipy only)
 pip install -e .
 ```
 
@@ -135,7 +135,7 @@ Options:
 python -m tests.run_full_demo --task all --cv_folds 5    # 5-fold CV across all datasets
 python -m tests.run_full_demo --task housing              # California Housing only
 python -m tests.run_full_demo --task negative             # Negative transfer detection demo
-python -m tests.run_full_demo --no-plots                  # Skip matplotlib visualizations
+python -m tests.run_full_demo --quiet --no-plots          # Skip training progress + plots
 ```
 
 ### Run the Tests
@@ -157,10 +157,15 @@ from libraries import (
 
 set_seed(42)
 
-# 1. Train source model
+# Prepare your own source/target data as torch tensors
+# X_source: (n_s, d), y_source: (n_s,)
+# X_target: (n_t, d), y_target: (n_t,)
+
+# 1. Train source model (mini-batch SGD)
 w_src, b_src = fit_linear_sgd(X_source, y_source,
                                torch.zeros(d), torch.zeros(1),
-                               steps=500, lr=0.01)
+                               epochs=30, lr=0.01, batch_size=64,
+                               verbose=True, label="source")
 
 # 2. Check for negative transfer
 decision = should_transfer(X_source_np, X_target_np, verbose=True)
@@ -255,7 +260,7 @@ decision = should_transfer(X_source, X_target, verbose=True)
 # -> TRANSFER
 ```
 
-If **any** metric exceeds its threshold, transfer is flagged as risky. The demo shows naive transfer performs **47.8x worse** than scratch when detection warnings are ignored.
+If **any** metric exceeds its threshold, transfer is flagged as risky. The demo shows naive transfer performs **9.2x worse** than scratch when detection warnings are ignored.
 
 There is also `validate_transfer()` — an empirical validation approach that splits target data to directly compare transfer vs scratch performance before committing.
 
@@ -302,9 +307,10 @@ Each dataset uses a principled domain split that creates natural covariate shift
 | `--task` | `all` | `housing`, `wine`, `titanic`, `cancer`, `multiclass`, `negative`, or `all` |
 | `--seed` | `42` | Random seed |
 | `--lr` | `0.01` | Learning rate |
-| `--source_steps` | `500` | SGD steps for source pretraining |
-| `--scratch_steps` | `500` | SGD steps for training from scratch |
-| `--budget_steps` | `50` | SGD steps for transfer methods (10x less) |
+| `--source_epochs` | `30` | Epochs for source pretraining |
+| `--scratch_epochs` | `30` | Epochs for training from scratch |
+| `--budget_epochs` | `3` | Epochs for transfer methods (10x less) |
+| `--batch_size` | `64` | Mini-batch size for SGD |
 | `--target_frac` | `0.25` | Fraction of target training data to use |
 | `--cv_folds` | `3` | Number of cross-validation folds |
 | `--lora_rank` | `2` | LoRA rank |
@@ -312,6 +318,7 @@ Each dataset uses a principled domain split that creates natural covariate shift
 | `--bayes_precision` | `1.0` | Bayesian prior precision |
 | `--power_w` | `30.0` | Estimated hardware power draw (watts) |
 | `--grid_kg` | `0.45` | Grid CO2 intensity (kg CO2/kWh) |
+| `--quiet` | `false` | Suppress per-epoch training progress output |
 | `--no-plots` | `false` | Skip matplotlib figure generation |
 
 ---
@@ -319,22 +326,27 @@ Each dataset uses a principled domain split that creates natural covariate shift
 ## Key Findings
 
 1. **85-99% CO2 reduction** -- Transfer methods use a fraction of the compute budget while matching or exceeding scratch performance
-2. **20/22 evaluations succeed** -- Transfer matches or beats full scratch training across 4 datasets and 5+ methods
-3. **5-100x convergence speedup** -- Transfer reaches scratch-quality performance in far fewer gradient steps
+2. **19/22 evaluations succeed** -- Transfer matches or beats full scratch training across 4 datasets and 5+ methods (14 BEATS FULL, 5 ~MATCHES)
+3. **Up to 30x convergence speedup** -- Transfer reaches scratch-quality performance in 1 epoch vs 30 epochs from scratch
 4. **Closed-form is king** -- Regularized and Bayesian transfer solve analytically for linear regression (zero iterations needed)
 5. **LoRA scales for classical ML** -- 9.4x parameter reduction for multi-class logistic regression (d=1000, k=50, r=5)
-6. **Detection prevents harm** -- MMD + PAD + KS reliably detect when source and target domains are incompatible (47.8x worse performance when ignored)
+6. **Detection prevents harm** -- MMD + PAD + KS reliably detect when source and target domains are incompatible (9.2x worse performance when ignored)
 
 ---
 
 ## Dependencies
 
+**Core** (installed with `pip install -e .`):
 - **Python** >= 3.9
 - **PyTorch** >= 2.0
-- **NumPy**, **SciPy**, **pandas**
-- **scikit-learn** (dataset loading and preprocessing only -- all models are from scratch)
-- **matplotlib** *(optional)* -- visualization
-- **CodeCarbon** *(optional)* -- hardware-level energy tracking
+- **NumPy**, **SciPy**
+
+**Datasets / Demo** (installed with `pip install -e ".[datasets]"` or `".[all]"`):
+- **pandas**, **scikit-learn**, **seaborn** (dataset loading and preprocessing — all models are from scratch)
+
+**Optional**:
+- **matplotlib** — visualization (`pip install -e ".[viz]"`)
+- **CodeCarbon** — hardware-level energy tracking (`pip install -e ".[carbon]"`)
 
 ---
 
