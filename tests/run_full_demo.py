@@ -240,12 +240,12 @@ def run_convergence_analysis(load_fn, task_type, label, args):
         fit_fn = fit_linear_sgd
         w_src, b_src = fit_linear_sgd(
             Xs_t, ys_t, w0, b0, epochs=args.source_epochs, lr=args.lr,
-            batch_size=bs, verbose=args.verbose, label="source pretrain")
+            batch_size=bs, verbose=args.show_epochs, label="source pretrain")
     else:
         fit_fn = fit_logistic_sgd
         w_src, b_src = fit_logistic_sgd(
             Xs_t, ys_t, w0, b0, epochs=args.source_epochs, lr=args.lr,
-            batch_size=bs, verbose=args.verbose, label="source pretrain")
+            batch_size=bs, verbose=args.show_epochs, label="source pretrain")
     print(f"    done ({time.time() - t0:.2f}s)")
 
     # --- Convergence sweep ---
@@ -319,6 +319,7 @@ def run_linear_methods(Xs_tr_t, ys_tr_t, Xt_tr_t, yt_tr_t, Xte_t, yte_t,
     scratch_wd = hp["scratch_wd"]   # scratch weight decay (typically 0)
 
     v = args.verbose and fold_idx == 0    # verbose only on first fold
+    v_ep = args.show_epochs and fold_idx == 0  # epoch logs only on first fold
     if v and (bs != args.batch_size or budget_ep != args.budget_epochs):
         print(f"\n    [adaptive] n_target={n_tgt} → "
               f"scratch_ep={scratch_ep}, budget_ep={budget_ep}, "
@@ -332,7 +333,7 @@ def run_linear_methods(Xs_tr_t, ys_tr_t, Xt_tr_t, yt_tr_t, Xte_t, yte_t,
     tracker.start()
     w_src, b_src = fit_linear_sgd(
         Xs_tr_t, ys_tr_t, w0, b0, epochs=source_ep, lr=args.lr,
-        batch_size=args.batch_size, verbose=v, label="source")
+        batch_size=args.batch_size, verbose=v_ep, label="source")
     src_carbon = tracker.stop()
 
     def eval_lin(w, b):
@@ -347,7 +348,7 @@ def run_linear_methods(Xs_tr_t, ys_tr_t, Xt_tr_t, yt_tr_t, Xte_t, yte_t,
     tracker.start()
     w, b = fit_linear_sgd(
         Xt_tr_t, yt_tr_t, w0, b0, epochs=scratch_ep, lr=lr,
-        batch_size=bs, verbose=v, label="scratch-full", weight_decay=scratch_wd)
+        batch_size=bs, verbose=v_ep, label="scratch-full", weight_decay=scratch_wd)
     results["Scratch (full)"] = (eval_lin(w, b), tracker.stop())
 
     # --- Scratch BUDGET ---
@@ -358,7 +359,7 @@ def run_linear_methods(Xs_tr_t, ys_tr_t, Xt_tr_t, yt_tr_t, Xte_t, yte_t,
     tracker.start()
     w, b = fit_linear_sgd(
         Xt_tr_t, yt_tr_t, w0, b0, epochs=budget_ep, lr=lr,
-        batch_size=bs, verbose=v, label="scratch-budget", weight_decay=scratch_wd)
+        batch_size=bs, verbose=v_ep, label="scratch-budget", weight_decay=scratch_wd)
     results["Scratch (budget)"] = (eval_lin(w, b), tracker.stop())
 
     # --- Weight Transfer ---
@@ -371,7 +372,7 @@ def run_linear_methods(Xs_tr_t, ys_tr_t, Xt_tr_t, yt_tr_t, Xte_t, yte_t,
     tracker.start()
     w, b = fit_linear_sgd(
         Xt_tr_t, yt_tr_t, w_src, b_src, epochs=budget_ep, lr=lr,
-        batch_size=bs, verbose=v, label="weight-transfer")
+        batch_size=bs, verbose=v_ep, label="weight-transfer")
     results["Weight Transfer"] = (eval_lin(w, b), tracker.stop())
 
     # --- Regularized (closed-form) ---
@@ -413,6 +414,7 @@ def run_linear_methods(Xs_tr_t, ys_tr_t, Xt_tr_t, yt_tr_t, Xte_t, yte_t,
     tracker.start()
     n_t = Xt_tr_t.shape[0]
     n_batches = max(1, math.ceil(n_t / bs))
+    log_every = max(1, budget_ep // 5)
     for epoch in range(budget_ep):
         perm = torch.randperm(n_t)
         epoch_loss = 0.0
@@ -423,10 +425,11 @@ def run_linear_methods(Xs_tr_t, ys_tr_t, Xt_tr_t, yt_tr_t, Xte_t, yte_t,
             loss = torch.mean((yhat - yt_tr_t[idx]) ** 2)
             loss.backward(); opt.step()
             epoch_loss += loss.item()
-        if v:
+        if v_ep and (epoch == 0 or epoch == budget_ep - 1
+                  or (epoch + 1) % log_every == 0):
             avg_loss = epoch_loss / n_batches
             print(f"      epoch {epoch+1}/{budget_ep}  "
-                  f"[{n_batches} batches]  loss={avg_loss:.4f}")
+                  f"loss={avg_loss:.4f}")
     results["LoRA"] = (eval_lin((w_src + adapter.delta_w()).detach(),
                                 (b_src + adapter.delta_b()).detach()), tracker.stop())
 
@@ -441,7 +444,7 @@ def run_linear_methods(Xs_tr_t, ys_tr_t, Xt_tr_t, yt_tr_t, Xte_t, yte_t,
     tracker.start()
     w, b = fit_linear_sgd(
         Xt_tr_t, yt_tr_t, w_map, b_map, epochs=budget_ep, lr=lr,
-        batch_size=bs, verbose=v, label="stat-map fine-tune")
+        batch_size=bs, verbose=v_ep, label="stat-map fine-tune")
     results["Stat Mapping"] = (eval_lin(w, b), tracker.stop())
 
     return results, src_carbon
@@ -464,6 +467,7 @@ def run_logistic_methods(Xs_tr_t, ys_tr_t, Xt_tr_t, yt_tr_t, Xte_t, yte_t,
     scratch_wd = hp["scratch_wd"]   # scratch weight decay (typically 0)
 
     v = args.verbose and fold_idx == 0    # verbose only on first fold
+    v_ep = args.show_epochs and fold_idx == 0  # epoch logs only on first fold
     if v and (bs != args.batch_size or budget_ep != args.budget_epochs):
         print(f"\n    [adaptive] n_target={n_tgt} → "
               f"scratch_ep={scratch_ep}, budget_ep={budget_ep}, "
@@ -477,7 +481,7 @@ def run_logistic_methods(Xs_tr_t, ys_tr_t, Xt_tr_t, yt_tr_t, Xte_t, yte_t,
     tracker.start()
     w_src, b_src = fit_logistic_sgd(
         Xs_tr_t, ys_tr_t, w0, b0, epochs=source_ep, lr=args.lr,
-        batch_size=args.batch_size, verbose=v, label="source")
+        batch_size=args.batch_size, verbose=v_ep, label="source")
     src_carbon = tracker.stop()
 
     def eval_log(w, b):
@@ -492,7 +496,7 @@ def run_logistic_methods(Xs_tr_t, ys_tr_t, Xt_tr_t, yt_tr_t, Xte_t, yte_t,
     tracker.start()
     w, b = fit_logistic_sgd(
         Xt_tr_t, yt_tr_t, w0, b0, epochs=scratch_ep, lr=lr,
-        batch_size=bs, verbose=v, label="scratch-full", weight_decay=scratch_wd)
+        batch_size=bs, verbose=v_ep, label="scratch-full", weight_decay=scratch_wd)
     results["Scratch (full)"] = (eval_log(w, b), tracker.stop())
 
     # --- Scratch BUDGET ---
@@ -503,7 +507,7 @@ def run_logistic_methods(Xs_tr_t, ys_tr_t, Xt_tr_t, yt_tr_t, Xte_t, yte_t,
     tracker.start()
     w, b = fit_logistic_sgd(
         Xt_tr_t, yt_tr_t, w0, b0, epochs=budget_ep, lr=lr,
-        batch_size=bs, verbose=v, label="scratch-budget", weight_decay=scratch_wd)
+        batch_size=bs, verbose=v_ep, label="scratch-budget", weight_decay=scratch_wd)
     results["Scratch (budget)"] = (eval_log(w, b), tracker.stop())
 
     # --- Weight Transfer ---
@@ -514,7 +518,7 @@ def run_logistic_methods(Xs_tr_t, ys_tr_t, Xt_tr_t, yt_tr_t, Xte_t, yte_t,
     tracker.start()
     w, b = fit_logistic_sgd(
         Xt_tr_t, yt_tr_t, w_src, b_src, epochs=budget_ep, lr=lr,
-        batch_size=bs, verbose=v, label="weight-transfer")
+        batch_size=bs, verbose=v_ep, label="weight-transfer")
     results["Weight Transfer"] = (eval_log(w, b), tracker.stop())
 
     # --- Regularized Transfer (gradient-based for logistic) ---
@@ -526,7 +530,7 @@ def run_logistic_methods(Xs_tr_t, ys_tr_t, Xt_tr_t, yt_tr_t, Xte_t, yte_t,
     w, b = regularized_transfer_logistic(
         Xt_tr_t, yt_tr_t, w_src, b_src, lam=args.reg_lambda,
         epochs=budget_ep, lr=lr, batch_size=bs,
-        verbose=v, label="regularized")
+        verbose=v_ep, label="regularized")
     results["Regularized"] = (eval_log(w, b), tracker.stop())
 
     # --- Bayesian Transfer (gradient-based for logistic) ---
@@ -538,7 +542,7 @@ def run_logistic_methods(Xs_tr_t, ys_tr_t, Xt_tr_t, yt_tr_t, Xte_t, yte_t,
     w, b = bayesian_transfer_logistic(
         Xt_tr_t, yt_tr_t, w_src, b_src, source_precision=args.bayes_precision,
         epochs=budget_ep, lr=lr, batch_size=bs,
-        verbose=v, label="bayesian")
+        verbose=v_ep, label="bayesian")
     results["Bayesian"] = (eval_log(w, b), tracker.stop())
 
     # --- LoRA (mini-batch with progress) ---
@@ -553,6 +557,7 @@ def run_logistic_methods(Xs_tr_t, ys_tr_t, Xt_tr_t, yt_tr_t, Xte_t, yte_t,
     tracker.start()
     n_t = Xt_tr_t.shape[0]
     n_batches = max(1, math.ceil(n_t / bs))
+    log_every = max(1, budget_ep // 5)
     for epoch in range(budget_ep):
         perm = torch.randperm(n_t)
         epoch_loss = 0.0
@@ -563,10 +568,11 @@ def run_logistic_methods(Xs_tr_t, ys_tr_t, Xt_tr_t, yt_tr_t, Xte_t, yte_t,
             loss = bce(logits, yt_tr_t[idx])
             loss.backward(); opt.step()
             epoch_loss += loss.item()
-        if v:
+        if v_ep and (epoch == 0 or epoch == budget_ep - 1
+                  or (epoch + 1) % log_every == 0):
             avg_loss = epoch_loss / n_batches
             print(f"      epoch {epoch+1}/{budget_ep}  "
-                  f"[{n_batches} batches]  loss={avg_loss:.4f}")
+                  f"loss={avg_loss:.4f}")
     results["LoRA"] = (eval_log((w_src + adapter.delta_w()).detach(),
                                 (b_src + adapter.delta_b()).detach()), tracker.stop())
 
@@ -581,7 +587,7 @@ def run_logistic_methods(Xs_tr_t, ys_tr_t, Xt_tr_t, yt_tr_t, Xte_t, yte_t,
     tracker.start()
     w, b = fit_logistic_sgd(
         Xt_tr_t, yt_tr_t, w_map, b_map, epochs=budget_ep, lr=lr,
-        batch_size=bs, verbose=v, label="stat-map fine-tune")
+        batch_size=bs, verbose=v_ep, label="stat-map fine-tune")
     results["Stat Mapping"] = (eval_log(w, b), tracker.stop())
 
     return results, src_carbon
@@ -764,17 +770,17 @@ def run_negative_transfer_demo(args):
     print(f"    Training source (20 ep)...")
     w_src, b_src = fit_linear_sgd(X_src_t, y_src_t, w0, b0,
                                    epochs=20, lr=0.01, batch_size=bs,
-                                   verbose=args.verbose, label="source")
+                                   verbose=args.show_epochs, label="source")
     print(f"    Training scratch (20 ep)...")
     w_scratch, b_scratch = fit_linear_sgd(X_tgt_t, y_tgt_t, w0, b0,
                                            epochs=20, lr=0.01, batch_size=bs,
-                                           verbose=args.verbose, label="scratch")
+                                           verbose=args.show_epochs, label="scratch")
     scratch_mse = mse(X_test_t @ w_scratch + b_scratch, y_test_t)
 
     print(f"    Training naive transfer (3 ep from source)...")
     w_tr, b_tr = fit_linear_sgd(X_tgt_t, y_tgt_t, w_src, b_src,
                                  epochs=3, lr=0.01, batch_size=bs,
-                                 verbose=args.verbose, label="naive transfer")
+                                 verbose=args.show_epochs, label="naive transfer")
     transfer_mse = mse(X_test_t @ w_tr + b_tr, y_test_t)
 
     w_reg, b_reg = regularized_transfer_linear(X_tgt_t, y_tgt_t, w_src, b_src, lam=0.1)
@@ -835,6 +841,7 @@ def run_multiclass_lora_demo(args):
     tracker = CarbonTracker("full_multiclass", power_watts=args.power_w,
                             carbon_intensity_kg_kwh=args.grid_kg)
     tracker.start()
+    mc_log_every = max(1, full_epochs // 5)
     for epoch in range(full_epochs):
         perm = torch.randperm(n)
         epoch_loss = 0.0
@@ -844,10 +851,11 @@ def run_multiclass_lora_demo(args):
             loss = ce(X[idx] @ W_full + b_full, y[idx])
             loss.backward(); opt.step()
             epoch_loss += loss.item()
-        if args.verbose:
+        if args.show_epochs and (epoch == 0 or epoch == full_epochs - 1
+                             or (epoch + 1) % mc_log_every == 0):
             avg_loss = epoch_loss / n_batches
             print(f"      epoch {epoch+1:>2}/{full_epochs}  "
-                  f"[{n_batches} batches]  loss={avg_loss:.4f}")
+                  f"loss={avg_loss:.4f}")
     full_r = tracker.stop()
     full_acc = (torch.argmax(X @ W_full.detach() + b_full.detach(), dim=1) == y).float().mean()
 
@@ -866,6 +874,7 @@ def run_multiclass_lora_demo(args):
     tracker = CarbonTracker("lora_multiclass", power_watts=args.power_w,
                             carbon_intensity_kg_kwh=args.grid_kg)
     tracker.start()
+    mc_log_every = max(1, lora_epochs // 5)
     for epoch in range(lora_epochs):
         perm = torch.randperm(n)
         epoch_loss = 0.0
@@ -875,10 +884,11 @@ def run_multiclass_lora_demo(args):
             loss = ce(X[idx] @ (W_base + adapter.delta_W()) + (b_base + adapter.delta_b()), y[idx])
             loss.backward(); opt.step()
             epoch_loss += loss.item()
-        if args.verbose:
+        if args.show_epochs and (epoch == 0 or epoch == lora_epochs - 1
+                             or (epoch + 1) % mc_log_every == 0):
             avg_loss = epoch_loss / n_batches
             print(f"      epoch {epoch+1:>2}/{lora_epochs}  "
-                  f"[{n_batches} batches]  loss={avg_loss:.4f}")
+                  f"loss={avg_loss:.4f}")
     lora_r = tracker.stop()
     W_final = (W_base + adapter.delta_W()).detach()
     b_final = (b_base + adapter.delta_b()).detach()
@@ -1024,7 +1034,10 @@ def make_plots(all_summaries, lora_data, save_dir, show=True, convergence_data=N
         figs.append(fig); print(f"  Saved: efficiency_frontier.png")
 
     if show:
-        try: plt.show()
+        try:
+            import io, contextlib
+            with contextlib.redirect_stdout(io.StringIO()):
+                plt.show()
         except: pass
     for f in figs: plt.close(f)
 
@@ -1052,11 +1065,15 @@ def main():
     ap.add_argument("--grid_kg", type=float, default=0.45)
     ap.add_argument("--no-plots", action="store_true", dest="no_plots")
     ap.add_argument("--quiet", action="store_true",
-                    help="Suppress per-epoch training output")
+                    help="Suppress ALL training output (headers + epochs)")
+    ap.add_argument("--no-epochs", action="store_true", dest="no_epochs",
+                    help="Show headers & results but hide per-epoch logs")
     args = ap.parse_args()
 
     # verbose = True by default, suppressed with --quiet
     args.verbose = not args.quiet
+    # show_epochs: epoch-by-epoch loss lines (off with --quiet OR --no-epochs)
+    args.show_epochs = args.verbose and not args.no_epochs
 
     set_seed(args.seed)
     demo_start = time.time()
@@ -1069,10 +1086,12 @@ def main():
     print("  #  5 transfer methods | 5 datasets | mini-batch SGD | CO2        #")
     print("  #  26 passing tests | pip-installable | convergence analysis      #")
     print("  " + "#" * 71)
-    if args.verbose:
-        print(f"\n  Training progress: ON  (use --quiet to suppress)")
+    if not args.verbose:
+        print(f"\n  Training progress: OFF  (remove --quiet to see output)")
+    elif not args.show_epochs:
+        print(f"\n  Epoch logs: OFF  (remove --no-epochs for full detail)")
     else:
-        print(f"\n  Training progress: OFF (remove --quiet to see epochs)")
+        print(f"\n  Training progress: ON  (--no-epochs for clean output, --quiet for silent)")
 
     all_summaries, convergence_data, lora_data = [], [], None
 
