@@ -54,7 +54,7 @@ Transfer learning reaches the same performance as 30-epoch scratch training in *
 | Titanic | Classification | Stat Mapping | Acc=82.5% | BEATS FULL | 68% |
 | Breast Cancer | Classification | Weight Transfer | Acc=91.6% | ~MATCHES | 51% |
 
-**23/28 method-dataset pairs match or beat full scratch training** (11 BEATS FULL, 12 ~MATCHES).
+**23/28 method-dataset pairs match or beat full scratch training** (12 BEATS FULL, 11 ~MATCHES).
 
 ### Efficiency Frontier: Better Performance at Lower Cost
 
@@ -137,7 +137,10 @@ python -m tests.run_full_demo --task all --cv_folds 5    # 5-fold CV across all 
 python -m tests.run_full_demo --task housing              # California Housing only
 python -m tests.run_full_demo --task iris                 # Iris only
 python -m tests.run_full_demo --task negative             # Negative transfer detection demo
-python -m tests.run_full_demo --quiet --no-plots          # Skip training progress + plots
+python -m tests.run_full_demo --no-epochs --no-plots      # Clean output (no epoch logs, no plots)
+python -m tests.run_full_demo --quiet --no-plots          # Silent mode (no training output + no plots)
+python -m tests.run_full_demo --show-convergence          # Include convergence analysis tables
+python -m tests.run_full_demo --show-multiclass           # Include multi-class LoRA demo
 ```
 
 ### Run the Tests
@@ -321,15 +324,18 @@ Each dataset uses a principled domain split that creates natural covariate shift
 | `--bayes_precision` | `1.0` | Bayesian prior precision |
 | `--power_w` | `30.0` | Estimated hardware power draw (watts) |
 | `--grid_kg` | `0.45` | Grid CO2 intensity (kg CO2/kWh) |
-| `--quiet` | `false` | Suppress per-epoch training progress output |
+| `--quiet` | `false` | Suppress ALL training output (headers + epochs) |
+| `--no-epochs` | `false` | Show headers & results but hide per-epoch logs |
 | `--no-plots` | `false` | Skip matplotlib figure generation |
+| `--show-convergence` | `false` | Show convergence analysis for each dataset |
+| `--show-multiclass` | `false` | Show multi-class LoRA parameter-reduction demo |
 
 ---
 
 ## Key Findings
 
 1. **85-99% CO2 reduction** -- Transfer methods use a fraction of the compute budget while matching or exceeding scratch performance
-2. **23/28 evaluations succeed** -- Transfer matches or beats full scratch training across 5 datasets and 5+ methods (11 BEATS FULL, 12 ~MATCHES)
+2. **23/28 evaluations succeed** -- Transfer matches or beats full scratch training across 5 datasets and 5+ methods (12 BEATS FULL, 11 ~MATCHES)
 3. **Up to 30x convergence speedup** -- Transfer reaches scratch-quality performance in 1 epoch vs 30 epochs from scratch
 4. **Closed-form is king** -- Regularized and Bayesian transfer solve analytically for linear regression (zero iterations needed)
 5. **LoRA scales for classical ML** -- 9.4x parameter reduction for multi-class logistic regression (d=1000, k=50, r=5)

@@ -136,14 +136,14 @@ def adaptive_hparams(n_target, args):
             "scratch_wd": 0.0,
         }
     elif n_target >= 30:
-        # Small (30–79) — more epochs, moderate transfer wd
+        # Small (30–79) — more epochs, moderate transfer wd, higher lr
         bs = min(n_target, max(16, n_target // 2))
         return {
             "scratch_ep": max(args.scratch_epochs, 60),
             "budget_ep":  max(args.budget_epochs * 10, 50),
-            "source_ep":  args.source_epochs,
+            "source_ep":  max(args.source_epochs, 60),
             "bs":         bs,
-            "lr":         lr,
+            "lr":         max(lr, 0.05),
             "wd":         1e-2,
             "scratch_wd": 0.0,
         }
@@ -152,9 +152,9 @@ def adaptive_hparams(n_target, args):
         return {
             "scratch_ep": max(args.scratch_epochs, 80),
             "budget_ep":  max(args.budget_epochs * 15, 50),
-            "source_ep":  args.source_epochs,
+            "source_ep":  max(args.source_epochs, 80),
             "bs":         n_target,
-            "lr":         lr,
+            "lr":         max(lr, 0.05),
             "wd":         5e-2,
             "scratch_wd": 0.0,
         }
@@ -226,6 +226,8 @@ def run_convergence_analysis(load_fn, task_type, label, args):
     # Adapt batch size for small datasets
     hp = adaptive_hparams(n_tgt, args)
     bs = hp["bs"]
+    lr = hp["lr"]
+    source_ep = hp["source_ep"]
 
     print(f"\n  Data: {d} features | source={n_src} train | "
           f"target={len(Xt_tr)} full -> {n_tgt} used ({args.target_frac:.0%}) | "
@@ -239,12 +241,12 @@ def run_convergence_analysis(load_fn, task_type, label, args):
     if task_type == "linear":
         fit_fn = fit_linear_sgd
         w_src, b_src = fit_linear_sgd(
-            Xs_t, ys_t, w0, b0, epochs=args.source_epochs, lr=args.lr,
+            Xs_t, ys_t, w0, b0, epochs=source_ep, lr=lr,
             batch_size=bs, verbose=args.show_epochs, label="source pretrain")
     else:
         fit_fn = fit_logistic_sgd
         w_src, b_src = fit_logistic_sgd(
-            Xs_t, ys_t, w0, b0, epochs=args.source_epochs, lr=args.lr,
+            Xs_t, ys_t, w0, b0, epochs=source_ep, lr=lr,
             batch_size=bs, verbose=args.show_epochs, label="source pretrain")
     print(f"    done ({time.time() - t0:.2f}s)")
 
@@ -255,14 +257,14 @@ def run_convergence_analysis(load_fn, task_type, label, args):
     curves = {"Scratch (from zero)": [], "Weight Transfer (from source)": []}
 
     for ep in epoch_counts:
-        w, b = fit_fn(Xt_t, yt_t, w0, b0, epochs=ep, lr=args.lr, batch_size=bs)
+        w, b = fit_fn(Xt_t, yt_t, w0, b0, epochs=ep, lr=lr, batch_size=bs)
         if task_type == "linear":
             scratch_score = r2_score(Xte_t @ w + b, yte_t)
         else:
             scratch_score = accuracy_from_logits(Xte_t @ w + b, yte_t)
         curves["Scratch (from zero)"].append(scratch_score)
 
-        w, b = fit_fn(Xt_t, yt_t, w_src, b_src, epochs=ep, lr=args.lr, batch_size=bs)
+        w, b = fit_fn(Xt_t, yt_t, w_src, b_src, epochs=ep, lr=lr, batch_size=bs)
         if task_type == "linear":
             transfer_score = r2_score(Xte_t @ w + b, yte_t)
         else:
@@ -332,7 +334,7 @@ def run_linear_methods(Xs_tr_t, ys_tr_t, Xt_tr_t, yt_tr_t, Xte_t, yte_t,
                             carbon_intensity_kg_kwh=args.grid_kg)
     tracker.start()
     w_src, b_src = fit_linear_sgd(
-        Xs_tr_t, ys_tr_t, w0, b0, epochs=source_ep, lr=args.lr,
+        Xs_tr_t, ys_tr_t, w0, b0, epochs=source_ep, lr=lr,
         batch_size=args.batch_size, verbose=v_ep, label="source")
     src_carbon = tracker.stop()
 
@@ -480,7 +482,7 @@ def run_logistic_methods(Xs_tr_t, ys_tr_t, Xt_tr_t, yt_tr_t, Xte_t, yte_t,
                             carbon_intensity_kg_kwh=args.grid_kg)
     tracker.start()
     w_src, b_src = fit_logistic_sgd(
-        Xs_tr_t, ys_tr_t, w0, b0, epochs=source_ep, lr=args.lr,
+        Xs_tr_t, ys_tr_t, w0, b0, epochs=source_ep, lr=lr,
         batch_size=args.batch_size, verbose=v_ep, label="source")
     src_carbon = tracker.stop()
 
@@ -641,7 +643,7 @@ def cross_validate(load_fn, run_methods_fn, task_type, label, args):
             print(f"\n  [Negative Transfer Check — fold 0]")
             decision = should_transfer(Xs_tr, Xt_tr_small, verbose=True)
             if not decision["recommend"]:
-                print("  WARNING: High domain divergence detected.\n")
+                print("  WARNING: High domain divergence detected.")
 
         t_fold = time.time()
         print(f"\n  ---- Fold {fold + 1}/{args.cv_folds} ----")
@@ -694,6 +696,12 @@ def cross_validate(load_fn, run_methods_fn, task_type, label, args):
 
         if name == "Scratch (full)":
             verdict = "BASELINE"
+        elif name == "Scratch (budget)":
+            # Not a transfer method — just label relative performance
+            if mean_v > scratch_full_metric - 0.05:
+                verdict = "~MATCHES"
+            else:
+                verdict = "fewer epochs"
         elif mean_v > scratch_full_metric + 0.005:
             verdict = "BEATS FULL"
         elif mean_v > scratch_full_metric - 0.05:
@@ -1034,11 +1042,22 @@ def make_plots(all_summaries, lora_data, save_dir, show=True, convergence_data=N
         figs.append(fig); print(f"  Saved: efficiency_frontier.png")
 
     if show:
+        # In Colab/Jupyter, use IPython display so figures render inline
         try:
-            import io, contextlib
-            with contextlib.redirect_stdout(io.StringIO()):
-                plt.show()
-        except: pass
+            from IPython import get_ipython
+            if get_ipython() is not None:
+                from IPython.display import display
+                for f in figs:
+                    display(f)
+            else:
+                raise RuntimeError("not notebook")
+        except Exception:
+            # Terminal: suppress the <Figure ...> text from plt.show()
+            try:
+                import io, contextlib
+                with contextlib.redirect_stdout(io.StringIO()):
+                    plt.show()
+            except: pass
     for f in figs: plt.close(f)
 
 
@@ -1068,6 +1087,10 @@ def main():
                     help="Suppress ALL training output (headers + epochs)")
     ap.add_argument("--no-epochs", action="store_true", dest="no_epochs",
                     help="Show headers & results but hide per-epoch logs")
+    ap.add_argument("--show-convergence", action="store_true", dest="show_convergence",
+                    help="Show convergence analysis for each dataset")
+    ap.add_argument("--show-multiclass", action="store_true", dest="show_multiclass",
+                    help="Show multi-class LoRA parameter-reduction demo")
     args = ap.parse_args()
 
     # verbose = True by default, suppressed with --quiet
@@ -1080,11 +1103,11 @@ def main():
 
     print()
     print("  " + "#" * 71)
-    print("  #  libraries v0.3.0 - Transfer Learning for Classical ML         #")
-    print("  #  ASU Principled AI Spark Challenge                              #")
-    print("  #                                                                 #")
-    print("  #  5 transfer methods | 5 datasets | mini-batch SGD | CO2        #")
-    print("  #  26 passing tests | pip-installable | convergence analysis      #")
+    print("  #  libraries v0.3.0 - Transfer Learning for Classical ML              #")
+    print("  #  ASU Principled AI Spark Challenge                                  #")
+    print("  #                                                                     #")
+    print("  #  5 transfer methods | 5 datasets | mini-batch SGD | CO2             #")
+    print("  #  26 passing tests | pip-installable | convergence analysis          #")
     print("  " + "#" * 71)
     if not args.verbose:
         print(f"\n  Training progress: OFF  (remove --quiet to see output)")
@@ -1092,18 +1115,34 @@ def main():
         print(f"\n  Epoch logs: OFF  (remove --no-epochs for full detail)")
     else:
         print(f"\n  Training progress: ON  (--no-epochs for clean output, --quiet for silent)")
+    extras = []
+    if args.show_convergence:
+        extras.append("convergence analysis")
+    if args.show_multiclass:
+        extras.append("multi-class LoRA demo")
+    if extras:
+        print(f"  Extras: {', '.join(extras)}")
+    else:
+        print(f"  Extras: OFF  (--show-convergence / --show-multiclass to enable)")
 
     all_summaries, convergence_data, lora_data = [], [], None
 
-    if args.task in ["housing", "all"]:
-        convergence_data.append(run_convergence_analysis(
-            load_california_housing_linear, "linear", "CA Housing", args))
-    if args.task in ["iris", "all"]:
-        convergence_data.append(run_convergence_analysis(
-            load_iris_linear, "linear", "Iris", args))
-    if args.task in ["titanic", "all"]:
-        convergence_data.append(run_convergence_analysis(
-            load_titanic_logistic, "logistic", "Titanic", args))
+    if args.show_convergence:
+        if args.task in ["housing", "all"]:
+            convergence_data.append(run_convergence_analysis(
+                load_california_housing_linear, "linear", "CA Housing", args))
+        if args.task in ["wine", "all"]:
+            convergence_data.append(run_convergence_analysis(
+                load_wine_linear, "linear", "Wine Quality", args))
+        if args.task in ["iris", "all"]:
+            convergence_data.append(run_convergence_analysis(
+                load_iris_linear, "linear", "Iris", args))
+        if args.task in ["titanic", "all"]:
+            convergence_data.append(run_convergence_analysis(
+                load_titanic_logistic, "logistic", "Titanic", args))
+        if args.task in ["cancer", "all"]:
+            convergence_data.append(run_convergence_analysis(
+                load_breast_cancer_logistic, "logistic", "Breast Cancer", args))
 
     if args.task in ["housing", "all"]:
         s, o = cross_validate(load_california_housing_linear, run_linear_methods, "linear",
@@ -1132,7 +1171,7 @@ def main():
         all_summaries.append(("Breast Cancer (Accuracy)", s, o))
     if args.task in ["negative", "all"]:
         run_negative_transfer_demo(args)
-    if args.task in ["multiclass", "all"]:
+    if args.show_multiclass and args.task in ["multiclass", "all"]:
         lora_data = run_multiclass_lora_demo(args)
 
     if not args.no_plots and all_summaries:
