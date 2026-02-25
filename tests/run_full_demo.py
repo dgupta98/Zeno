@@ -43,7 +43,6 @@ from libraries.carbon import CarbonTracker, compare_emissions
 from tests.real_datasets import (
     load_california_housing_linear,
     load_wine_linear,
-    load_iris_linear,
     load_titanic_logistic,
     load_breast_cancer_logistic,
 )
@@ -1067,7 +1066,7 @@ def make_plots(all_summaries, lora_data, save_dir, show=True, convergence_data=N
 
 def main():
     ap = argparse.ArgumentParser(description="libraries v0.3.0 - Full Demo")
-    ap.add_argument("--task", choices=["housing","wine","iris","titanic","cancer",
+    ap.add_argument("--task", choices=["housing","wine","titanic","cancer",
                     "multiclass","negative","all"], default="all")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--lr", type=float, default=0.01)
@@ -1106,7 +1105,7 @@ def main():
     print("  #  libraries v0.3.0 - Transfer Learning for Classical ML              #")
     print("  #  ASU Principled AI Spark Challenge                                  #")
     print("  #                                                                     #")
-    print("  #  5 transfer methods | 5 datasets | mini-batch SGD | CO2             #")
+    print("  #  5 transfer methods | 4 datasets | mini-batch SGD | CO2             #")
     print("  #  26 passing tests | pip-installable | convergence analysis          #")
     print("  " + "#" * 71)
     if not args.verbose:
@@ -1134,9 +1133,6 @@ def main():
         if args.task in ["wine", "all"]:
             convergence_data.append(run_convergence_analysis(
                 load_wine_linear, "linear", "Wine Quality", args))
-        if args.task in ["iris", "all"]:
-            convergence_data.append(run_convergence_analysis(
-                load_iris_linear, "linear", "Iris", args))
         if args.task in ["titanic", "all"]:
             convergence_data.append(run_convergence_analysis(
                 load_titanic_logistic, "logistic", "Titanic", args))
@@ -1154,11 +1150,6 @@ def main():
             "WINE QUALITY - Linear Regression (predict quality score)\n"
             "  Source: Red Wine | Target: White Wine", args)
         all_summaries.append(("Wine Quality (R^2)", s, o))
-    if args.task in ["iris", "all"]:
-        s, o = cross_validate(load_iris_linear, run_linear_methods, "linear",
-            "IRIS - Linear Regression (predict petal length)\n"
-            "  Source: setosa+versicolor | Target: virginica", args)
-        all_summaries.append(("Iris (R^2)", s, o))
     if args.task in ["titanic", "all"]:
         s, o = cross_validate(load_titanic_logistic, run_logistic_methods, "logistic",
             "TITANIC - Logistic Regression (predict survival)\n"
@@ -1219,7 +1210,7 @@ def main():
     print(f"    6. All methods: from-scratch PyTorch (no sklearn models)")
 
     print(f"\n  LIBRARY STATS:")
-    print(f"    Modules:    7 | Tests: 26 passing | Datasets: 5 real-world")
+    print(f"    Modules:    7 | Tests: 26 passing | Datasets: 4 real-world")
     print(f"    Methods:    7 (Scratch, Weight Transfer, Regularized, Bayesian,")
     print(f"                   Covariance, LoRA, Stat Mapping)")
 

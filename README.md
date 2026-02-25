@@ -17,7 +17,7 @@
 
 ## Why This Project?
 
-Every model trained from scratch costs energy and emits CO2. **libraries** demonstrates that the same transfer learning techniques powering modern deep learning — weight transfer, LoRA, Bayesian priors — work remarkably well on classical linear and logistic regression, achieving **85-99% CO2 reduction** compared to full training while **matching or beating scratch performance in 23 out of 28 method-dataset evaluations**.
+Every model trained from scratch costs energy and emits CO2. **libraries** demonstrates that the same transfer learning techniques powering modern deep learning — weight transfer, LoRA, Bayesian priors — work remarkably well on classical linear and logistic regression, achieving **85-99% CO2 reduction** compared to full training while **matching or beating scratch performance in 19 out of 22 method-dataset evaluations**.
 
 > *"Efficient AI is inclusive AI. When AI requires less computation, more people can build it."*
 
@@ -50,11 +50,10 @@ Transfer learning reaches the same performance as 30-epoch scratch training in *
 |---------|------|---------------------|-------|-------------------|-----------|
 | CA Housing | Regression | Regularized | R²=0.58 | BEATS FULL | 99% |
 | Wine Quality | Regression | Regularized | R²=0.26 | BEATS FULL | 99% |
-| Iris | Regression | Covariance | R²=0.42 | BEATS FULL | 99% |
 | Titanic | Classification | Stat Mapping | Acc=82.5% | BEATS FULL | 68% |
 | Breast Cancer | Classification | Weight Transfer | Acc=91.6% | ~MATCHES | 51% |
 
-**23/28 method-dataset pairs match or beat full scratch training** (12 BEATS FULL, 11 ~MATCHES).
+**19/22 method-dataset pairs match or beat full scratch training** (10 BEATS FULL, 9 ~MATCHES).
 
 ### Efficiency Frontier: Better Performance at Lower Cost
 
@@ -79,7 +78,7 @@ Transfer methods consistently occupy the **upper-left quadrant** (high performan
 | **5 Transfer Methods** | Regularized weight transfer, LoRA adaptation, Bayesian prior transfer, Covariance-based analytical transfer, Statistical moment mapping |
 | **3 Negative Transfer Detectors** | Maximum Mean Discrepancy (MMD), Proxy A-distance (PAD), Feature-wise Kolmogorov-Smirnov tests |
 | **CO2 Tracking** | Integrated carbon emissions estimation (with optional [CodeCarbon](https://github.com/mlco2/codecarbon) support) |
-| **5 Real-World Datasets** | California Housing, Wine Quality, Iris, Titanic, Breast Cancer — with principled domain-split loaders (in `tests/`) |
+| **4 Real-World Datasets** | California Housing, Wine Quality, Titanic, Breast Cancer — with principled domain-split loaders (in `tests/`) |
 | **Convergence Analysis** | Epoch-by-epoch comparison showing transfer converges up to 30x faster |
 | **26 Smoke Tests** | Full pytest suite covering every module |
 | **pip-installable** | `pyproject.toml` with optional dependencies |
@@ -135,7 +134,6 @@ Options:
 ```bash
 python -m tests.run_full_demo --task all --cv_folds 5    # 5-fold CV across all datasets
 python -m tests.run_full_demo --task housing              # California Housing only
-python -m tests.run_full_demo --task iris                 # Iris only
 python -m tests.run_full_demo --task negative             # Negative transfer detection demo
 python -m tests.run_full_demo --no-epochs --no-plots      # Clean output (no epoch logs, no plots)
 python -m tests.run_full_demo --quiet --no-plots          # Silent mode (no training output + no plots)
@@ -300,7 +298,6 @@ Each dataset uses a principled domain split that creates natural covariate shift
 |---------|-------------|---------------|-------------|
 | CA Housing | Northern CA (Bay Area) | Southern CA (LA, San Diego) | Latitude > median |
 | Wine Quality | Red wine (1,599 samples) | White wine (4,898 samples) | Wine color |
-| Iris | Setosa + Versicolor | Virginica | Species classification |
 | Titanic | Embarked at Southampton | Embarked at Cherbourg/Queenstown | Port of embarkation |
 | Breast Cancer | Small tumors | Large tumors | Mean radius > median |
 
@@ -310,7 +307,7 @@ Each dataset uses a principled domain split that creates natural covariate shift
 
 | Flag | Default | Description |
 |---|---|---|
-| `--task` | `all` | `housing`, `wine`, `iris`, `titanic`, `cancer`, `multiclass`, `negative`, or `all` |
+| `--task` | `all` | `housing`, `wine`, `titanic`, `cancer`, `multiclass`, `negative`, or `all` |
 | `--seed` | `42` | Random seed |
 | `--lr` | `0.01` | Learning rate |
 | `--source_epochs` | `30` | Epochs for source pretraining |
@@ -335,7 +332,7 @@ Each dataset uses a principled domain split that creates natural covariate shift
 ## Key Findings
 
 1. **85-99% CO2 reduction** -- Transfer methods use a fraction of the compute budget while matching or exceeding scratch performance
-2. **23/28 evaluations succeed** -- Transfer matches or beats full scratch training across 5 datasets and 5+ methods (12 BEATS FULL, 11 ~MATCHES)
+2. **19/22 evaluations succeed** -- Transfer matches or beats full scratch training across 4 datasets and 5+ methods (10 BEATS FULL, 9 ~MATCHES)
 3. **Up to 30x convergence speedup** -- Transfer reaches scratch-quality performance in 1 epoch vs 30 epochs from scratch
 4. **Closed-form is king** -- Regularized and Bayesian transfer solve analytically for linear regression (zero iterations needed)
 5. **LoRA scales for classical ML** -- 9.4x parameter reduction for multi-class logistic regression (d=1000, k=50, r=5)
