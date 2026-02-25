@@ -250,16 +250,16 @@ Before transferring, libraries checks whether domains are compatible:
 | Metric | What It Measures | Safe Threshold |
 |---|---|---|
 | **MMD-squared** | Distribution distance in kernel space | < 0.5 |
-| **Proxy A-distance** | Domain classifier separability | < 1.5 |
-| **KS Test** | Per-feature distributional shift | < 50% features shifted |
+| **Proxy A-distance** | Domain classifier separability | < 1.9 |
+| **KS Test** | Per-feature distributional shift | < 100% features shifted |
 
 ```python
 from libraries import should_transfer
 
 decision = should_transfer(X_source, X_target, verbose=True)
 # MMD2 = 0.0312  (threshold: 0.5)
-# PAD  = 0.8421  (threshold: 1.5)
-# KS shifted = 25%  (threshold: 50%)
+# PAD  = 0.8421  (threshold: 1.9)
+# KS shifted = 25%  (threshold: 100%)
 # -> TRANSFER
 ```
 

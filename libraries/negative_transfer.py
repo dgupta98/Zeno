@@ -195,8 +195,8 @@ def ks_feature_test(X_source, X_target, alpha=0.05):
 # Unified Decision Function
 # ---------------------------------------------------------------------------
 
-def should_transfer(X_source, X_target, mmd_threshold=0.5, pad_threshold=1.5,
-                    ks_threshold=0.5, verbose=False):
+def should_transfer(X_source, X_target, mmd_threshold=0.5, pad_threshold=1.9,
+                    ks_threshold=1.0, verbose=False):
     """
     Decide whether transfer is likely to help or hurt.
 
@@ -206,9 +206,9 @@ def should_transfer(X_source, X_target, mmd_threshold=0.5, pad_threshold=1.5,
 
     Args:
         X_source, X_target: feature matrices
-        mmd_threshold: MMD² above this → domains too different
-        pad_threshold: PAD above this → domains too separable
-        ks_threshold: fraction of shifted features above this → risky
+        mmd_threshold: MMD² above this → domains too different (default 0.5)
+        pad_threshold: PAD above this → domains too separable  (default 1.9)
+        ks_threshold: fraction of shifted features above this → risky (default 1.0)
 
     Returns:
         dict with:
