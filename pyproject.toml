@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "libraries"
+version = "0.3.0"
+description = "Transfer Learning for Classical ML — from-scratch library demonstrating that deep learning transfer techniques apply to linear and logistic regression with measurable CO2 savings."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [
+    {name = "libraries contributors"},
+]
+keywords = [
+    "transfer-learning",
+    "classical-ml",
+    "green-ai",
+    "carbon-emissions",
+    "lora",
+    "bayesian-transfer",
+    "negative-transfer",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "torch>=2.0",
+    "numpy>=1.24",
+    "scipy>=1.10",
+]
+
+[project.optional-dependencies]
+datasets = ["pandas>=1.5", "scikit-learn>=1.2", "seaborn>=0.12"]
+viz = ["matplotlib>=3.6"]
+carbon = ["codecarbon>=2.0"]
+all = ["matplotlib>=3.6", "codecarbon>=2.0", "pandas>=1.5", "scikit-learn>=1.2", "seaborn>=0.12"]
+dev = ["pytest>=7.0", "matplotlib>=3.6", "pandas>=1.5", "scikit-learn>=1.2", "seaborn>=0.12"]
+
+[project.urls]
+Homepage = "https://github.com/dgupta98/Zeno"
+Documentation = "https://github.com/dgupta98/Zeno#readme"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["libraries*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

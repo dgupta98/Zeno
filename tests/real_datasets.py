@@ -186,15 +186,43 @@ def load_wine_linear(seed=0, test_frac=0.25):
     # Load red wine
     red = fetch_openml("wine-quality-red", version=1, as_frame=True, parser="auto")
     red_df = red.frame.copy()
-    red_df["quality"] = red_df["quality"].astype(float)
 
     # Load white wine
     white = fetch_openml("wine-quality-white", version=1, as_frame=True, parser="auto")
     white_df = white.frame.copy()
-    white_df["quality"] = white_df["quality"].astype(float)
 
+    # OpenML uses varying column names across versions/platforms.
+    # Both datasets have 11 features + 1 target.  Standardize to common names.
+    canonical_features = [
+        "fixed_acidity", "volatile_acidity", "citric_acid", "residual_sugar",
+        "chlorides", "free_sulfur_dioxide", "total_sulfur_dioxide", "density",
+        "pH", "sulphates", "alcohol",
+    ]
     target_col = "quality"
-    feature_cols = [c for c in red_df.columns if c != target_col]
+
+    def _normalize_wine_cols(df):
+        """Rename columns to canonical names regardless of OpenML format."""
+        cols = list(df.columns)
+        # Find the target column (last column, often 'class', 'Class', or 'quality')
+        tgt_candidates = [c for c in cols if c.lower() in ("class", "quality")]
+        if tgt_candidates:
+            tgt_name = tgt_candidates[0]
+        else:
+            tgt_name = cols[-1]  # fallback: last column is target
+        feat_cols = [c for c in cols if c != tgt_name]
+
+        rename_map = {tgt_name: target_col}
+        for i, fc in enumerate(feat_cols):
+            if i < len(canonical_features):
+                rename_map[fc] = canonical_features[i]
+        df = df.rename(columns=rename_map)
+        df[target_col] = df[target_col].astype(float)
+        return df
+
+    red_df = _normalize_wine_cols(red_df)
+    white_df = _normalize_wine_cols(white_df)
+
+    feature_cols = canonical_features
 
     src_df = red_df
     tgt_df = white_df
@@ -206,11 +234,15 @@ def load_wine_linear(seed=0, test_frac=0.25):
     tgt_train, tgt_test = tgt_df.iloc[tgt_tr_idx], tgt_df.iloc[tgt_te_idx]
 
     union_train = pd.concat([src_train, tgt_train], axis=0)
-    sc = StandardScaler().fit(union_train[feature_cols].to_numpy())
+    sc_x = StandardScaler().fit(union_train[feature_cols].to_numpy())
+    sc_y = StandardScaler().fit(
+        union_train[target_col].to_numpy().reshape(-1, 1))
 
     def xy(split):
-        X = sc.transform(split[feature_cols].to_numpy()).astype(np.float32)
-        y = split[target_col].to_numpy().astype(np.float32)
+        X = sc_x.transform(split[feature_cols].to_numpy()).astype(np.float32)
+        y = sc_y.transform(
+            split[target_col].to_numpy().reshape(-1, 1)
+        ).ravel().astype(np.float32)
         return X, y
 
     Xs_tr, ys_tr = xy(src_train)
@@ -221,20 +253,32 @@ def load_wine_linear(seed=0, test_frac=0.25):
     return (Xs_tr, ys_tr, Xs_te, ys_te), (Xt_tr, yt_tr, Xt_te, yt_te)
 
 
-def load_iris_linear(seed=0, test_frac=0.25):
-    from sklearn.datasets import load_iris
-    iris = load_iris(as_frame=True)
-    df = iris.frame.copy()
+def load_california_housing_linear(seed=0, test_frac=0.25):
+    """
+    California Housing — linear regression (predict median house value).
 
-    # Iris is classification; to use LINEAR regression we predict a continuous value:
-    # predict "petal length (cm)" from other numeric features (sepal length/width + petal width)
-    target_col = "petal length (cm)"
+    Domain split by latitude: source = Northern CA (Bay Area, Sacramento),
+    target = Southern CA (LA, San Diego).  This creates a natural covariate
+    shift — housing patterns differ but the feature-price relationship
+    has strong overlap, making it ideal for transfer learning.
+
+    20,640 samples, 8 features.
+    """
+    from sklearn.datasets import fetch_california_housing
+    from sklearn.preprocessing import StandardScaler
+
+    data = fetch_california_housing(as_frame=True)
+    df = data.frame.copy()
+    # data.frame already has MedHouseVal; rename it to "target"
+    df = df.rename(columns={"MedHouseVal": "target"})
+
+    target_col = "target"
     feature_cols = [c for c in df.columns if c != target_col]
 
-    # Domain split by species (target) to simulate transfer across domains
-    # source: setosa + versicolor, target: virginica
-    src_df = df[df["target"].isin([0, 1])].copy()
-    tgt_df = df[df["target"].isin([2])].copy()
+    # Domain split: North CA (latitude > median) vs South CA
+    median_lat = df["Latitude"].median()
+    src_df = df[df["Latitude"] >= median_lat].copy()
+    tgt_df = df[df["Latitude"] < median_lat].copy()
 
     src_tr_idx, src_te_idx = _train_test_split_idx(len(src_df), test_frac=test_frac, seed=seed)
     tgt_tr_idx, tgt_te_idx = _train_test_split_idx(len(tgt_df), test_frac=test_frac, seed=seed + 1)
@@ -242,23 +286,17 @@ def load_iris_linear(seed=0, test_frac=0.25):
     src_train, src_test = src_df.iloc[src_tr_idx], src_df.iloc[src_te_idx]
     tgt_train, tgt_test = tgt_df.iloc[tgt_tr_idx], tgt_df.iloc[tgt_te_idx]
 
-    # Use only numeric predictors, exclude "target" label column to avoid leaking domain id
-    src_train = src_train.drop(columns=["target"], errors="ignore")
-    src_test = src_test.drop(columns=["target"], errors="ignore")
-    tgt_train = tgt_train.drop(columns=["target"], errors="ignore")
-    tgt_test = tgt_test.drop(columns=["target"], errors="ignore")
-
-    # Shared preprocessor (all numeric here, but keep consistent)
+    # Shared scaler fit on union of training data
     union_train = pd.concat([src_train, tgt_train], axis=0)
+    sc_x = StandardScaler().fit(union_train[feature_cols].to_numpy())
+    sc_y = StandardScaler().fit(
+        union_train[target_col].to_numpy().reshape(-1, 1))
 
-    Xs_tr = union_train.drop(columns=[target_col]).to_numpy().astype(np.float32)
-    # We'll use sklearn scaler for stability
-    from sklearn.preprocessing import StandardScaler
-    sc = StandardScaler().fit(Xs_tr)
-
-    def xy(df_):
-        X = sc.transform(df_.drop(columns=[target_col]).to_numpy()).astype(np.float32)
-        y = df_[target_col].to_numpy().astype(np.float32)
+    def xy(split):
+        X = sc_x.transform(split[feature_cols].to_numpy()).astype(np.float32)
+        y = sc_y.transform(
+            split[target_col].to_numpy().reshape(-1, 1)
+        ).ravel().astype(np.float32)
         return X, y
 
     Xs_tr, ys_tr = xy(src_train)
