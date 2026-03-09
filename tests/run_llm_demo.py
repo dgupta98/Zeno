@@ -62,6 +62,22 @@ from libraries.carbon import compare_emissions
 
 
 # ═══════════════════════════════════════════════════════════════════
+# Device Auto-Detection
+# ═══════════════════════════════════════════════════════════════════
+
+def get_device():
+    """Auto-detect the best available device: CUDA > MPS > CPU."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+DEVICE = get_device()
+
+
+# ═══════════════════════════════════════════════════════════════════
 # Model Wrapper: DistilBERT → Zeno-compatible classifier
 # ═══════════════════════════════════════════════════════════════════
 
@@ -198,7 +214,7 @@ def demo_finetune(args, tokenizer, data_a, data_b):
 
     # Full fine-tuning with carbon tracking
     print(f"\n  Loading {MODEL_NAME} (66M params)...")
-    model = LLMClassifier(MODEL_NAME, num_labels=2)
+    model = LLMClassifier(MODEL_NAME, num_labels=2).to(DEVICE)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"  Total parameters: {total_params:,}")
 
@@ -209,10 +225,10 @@ def demo_finetune(args, tokenizer, data_a, data_b):
     history = fine_tune(
         model, train_a, val_a,
         epochs=args.epochs, optimizer=optimizer, criterion=criterion,
-        carbon_tracker=tracker, verbose=True,
+        carbon_tracker=tracker, verbose=True, device=str(DEVICE),
     )
 
-    result = evaluate(model, val_a, criterion)
+    result = evaluate(model, val_a, criterion, device=str(DEVICE))
     print(f"\n  Final sentiment accuracy: {result['accuracy']:.1%}")
     print(f"  CO2 emitted: {history['co2_result']['co2_kg']:.2e} kg")
 
@@ -251,8 +267,10 @@ def demo_cka(args, model_a, data_a, data_b):
 
     for layer, label in zip(layer_names, layer_labels):
         try:
-            reps_a = extract_representations(model_a, val_a, layer)
-            reps_b = extract_representations(model_a, val_b, layer)
+            reps_a = extract_representations(model_a, val_a, layer,
+                                              device=str(DEVICE))
+            reps_b = extract_representations(model_a, val_b, layer,
+                                              device=str(DEVICE))
             cka = compute_cka(reps_a, reps_b)
             print(f"  {label:<30} {cka:>9.4f}")
         except Exception as e:
@@ -278,7 +296,7 @@ def demo_lora(args, tokenizer, data_a, pretrained_model):
 
     # Full fine-tuning baseline
     print("\n  [A] Full fine-tuning (all 66M params trainable)...")
-    model_full = copy.deepcopy(pretrained_model)
+    model_full = copy.deepcopy(pretrained_model).to(DEVICE)
     total_p = sum(p.numel() for p in model_full.parameters())
     tracker_full = GPUCarbonTracker("full_ft", power_watts=30.0)
     opt_full = torch.optim.AdamW(model_full.parameters(), lr=args.lr)
@@ -286,16 +304,16 @@ def demo_lora(args, tokenizer, data_a, pretrained_model):
     tracker_full.start()
     t0 = time.time()
     for ep in range(args.epochs):
-        train_epoch(model_full, train_a, criterion, opt_full)
+        train_epoch(model_full, train_a, criterion, opt_full, device=str(DEVICE))
     full_time = time.time() - t0
     carbon_full = tracker_full.stop()
-    result_full = evaluate(model_full, val_a, criterion)
+    result_full = evaluate(model_full, val_a, criterion, device=str(DEVICE))
     print(f"    Accuracy: {result_full['accuracy']:.1%}  "
           f"Time: {full_time:.1f}s  Params: {total_p:,}")
 
     # LoRA fine-tuning
     print(f"\n  [B] LoRA fine-tuning (rank={args.lora_rank}, Q/V projections)...")
-    model_lora = copy.deepcopy(pretrained_model)
+    model_lora = copy.deepcopy(pretrained_model).to(DEVICE)
     n_injected = LoRAInjector.inject(
         model_lora,
         target_modules=["q_lin", "v_lin"],  # DistilBERT attention Q and V
@@ -314,18 +332,18 @@ def demo_lora(args, tokenizer, data_a, pretrained_model):
     tracker_lora.start()
     t0 = time.time()
     for ep in range(args.epochs):
-        train_epoch(model_lora, train_a, criterion, opt_lora)
+        train_epoch(model_lora, train_a, criterion, opt_lora, device=str(DEVICE))
     lora_time = time.time() - t0
     carbon_lora = tracker_lora.stop()
-    result_lora = evaluate(model_lora, val_a, criterion)
+    result_lora = evaluate(model_lora, val_a, criterion, device=str(DEVICE))
     print(f"    Accuracy: {result_lora['accuracy']:.1%}  "
           f"Time: {lora_time:.1f}s  Params: {lora_trainable:,}")
 
     # Merge LoRA for inference
     print("\n  Merging LoRA weights into base model...")
-    pre_merge = evaluate(model_lora, val_a, criterion)
+    pre_merge = evaluate(model_lora, val_a, criterion, device=str(DEVICE))
     LoRAInjector.merge_all(model_lora)
-    post_merge = evaluate(model_lora, val_a, criterion)
+    post_merge = evaluate(model_lora, val_a, criterion, device=str(DEVICE))
     print(f"    Pre-merge acc:  {pre_merge['accuracy']:.1%}")
     print(f"    Post-merge acc: {post_merge['accuracy']:.1%}")
     print(f"    Merge produces identical outputs (zero overhead at inference)")
@@ -364,7 +382,8 @@ def demo_ewc(args, pretrained_model, data_a, data_b):
 
     # Compute Fisher on Task A (backbone only)
     print("\n  Computing Fisher Information on sentiment task...")
-    fisher_full = compute_fisher_diagonal(pretrained_model, train_a, criterion)
+    fisher_full = compute_fisher_diagonal(pretrained_model, train_a, criterion,
+                                           device=str(DEVICE))
     # Filter to backbone-only (exclude classifier — different shapes for Task B)
     fisher = {k: v for k, v in fisher_full.items()
               if not k.startswith("classifier.")}
@@ -373,35 +392,37 @@ def demo_ewc(args, pretrained_model, data_a, data_b):
     print(f"    Fisher over {n_fisher:,} backbone params")
     print(f"    Max importance: {top_importance:.6f}")
 
-    source_model = copy.deepcopy(pretrained_model)
+    source_model = copy.deepcopy(pretrained_model).to(DEVICE)
 
     # Task B model: new 4-class head on pretrained backbone
     print(f"\n  Building Task B model (4-class news topic classifier)...")
     model_no_ewc = LLMClassifier(MODEL_NAME, num_labels=4)
     load_backbone_state_dict(model_no_ewc, get_backbone_state_dict(pretrained_model))
-    model_ewc = copy.deepcopy(model_no_ewc)
+    model_no_ewc = model_no_ewc.to(DEVICE)
+    model_ewc = copy.deepcopy(model_no_ewc).to(DEVICE)
 
     # Fine-tune on Task B WITHOUT EWC
     print("\n  [A] Fine-tuning on news WITHOUT EWC...")
     opt = torch.optim.AdamW(model_no_ewc.parameters(), lr=args.lr)
     for ep in range(args.epochs):
-        loss = train_epoch(model_no_ewc, train_b, criterion, opt)
+        loss = train_epoch(model_no_ewc, train_b, criterion, opt,
+                           device=str(DEVICE))
         if not args.quiet:
-            r = evaluate(model_no_ewc, val_b, criterion)
+            r = evaluate(model_no_ewc, val_b, criterion, device=str(DEVICE))
             print(f"      epoch {ep+1}/{args.epochs}  loss={loss:.4f}  "
                   f"news_acc={r['accuracy']:.1%}")
-    result_no_ewc = evaluate(model_no_ewc, val_b, criterion)
+    result_no_ewc = evaluate(model_no_ewc, val_b, criterion, device=str(DEVICE))
 
     # Fine-tune on Task B WITH EWC
     print(f"\n  [B] Fine-tuning on news WITH EWC (lambda=500)...")
-    ewc_loss = EWCLoss(source_model, fisher, lambda_=500.0)
+    ewc_loss = EWCLoss(source_model, fisher, lambda_=500.0).to(DEVICE)
     opt = torch.optim.AdamW(model_ewc.parameters(), lr=args.lr)
     for ep in range(args.epochs):
         model_ewc.train()
         total_loss = 0.0
         n_batches = 0
         for batch in train_b:
-            inputs, targets = batch[0], batch[1]
+            inputs, targets = batch[0].to(DEVICE), batch[1].to(DEVICE)
             opt.zero_grad()
             loss = criterion(model_ewc(inputs), targets) + ewc_loss(model_ewc)
             loss.backward()
@@ -410,10 +431,10 @@ def demo_ewc(args, pretrained_model, data_a, data_b):
             n_batches += 1
         avg_loss = total_loss / max(n_batches, 1)
         if not args.quiet:
-            r = evaluate(model_ewc, val_b, criterion)
+            r = evaluate(model_ewc, val_b, criterion, device=str(DEVICE))
             print(f"      epoch {ep+1}/{args.epochs}  loss={avg_loss:.4f}  "
                   f"news_acc={r['accuracy']:.1%}")
-    result_ewc = evaluate(model_ewc, val_b, criterion)
+    result_ewc = evaluate(model_ewc, val_b, criterion, device=str(DEVICE))
 
     # Measure backbone drift from pretrained (backbone only — heads differ)
     print("\n  Backbone parameter drift from pretrained:")
@@ -470,6 +491,7 @@ def demo_progressive(args, pretrained_model, data_b):
 
     model = LLMClassifier(MODEL_NAME, num_labels=4)
     load_backbone_state_dict(model, get_backbone_state_dict(pretrained_model))
+    model = model.to(DEVICE)
 
     base_model = BaseModel(model)
     groups = base_model.get_layer_groups()
@@ -484,16 +506,17 @@ def demo_progressive(args, pretrained_model, data_b):
     for ep in range(args.epochs):
         scheduler.step(ep)
         opt = scheduler.build_optimizer()
-        loss = train_epoch(base_model, train_b, criterion, opt)
+        loss = train_epoch(base_model, train_b, criterion, opt,
+                           device=str(DEVICE))
         if not args.quiet:
-            r = evaluate(base_model, val_b, criterion)
+            r = evaluate(base_model, val_b, criterion, device=str(DEVICE))
             unfrozen = sum(1 for _, ps in groups for p in ps if p.requires_grad)
             total_tensors = sum(1 for _, ps in groups for _ in ps)
             print(f"      epoch {ep+1}/{args.epochs}  loss={loss:.4f}  "
                   f"acc={r['accuracy']:.1%}  "
                   f"unfrozen={unfrozen}/{total_tensors} param tensors")
 
-    result = evaluate(base_model, val_b, criterion)
+    result = evaluate(base_model, val_b, criterion, device=str(DEVICE))
     print(f"\n  Final news accuracy: {result['accuracy']:.1%}")
     return model
 
@@ -513,23 +536,23 @@ def demo_merging(args, pretrained_model, data_b):
 
     # Train variant 1 (lower LR)
     print("\n  Training variant 1 (lr={:.0e})...".format(args.lr))
-    model_v1 = LLMClassifier(MODEL_NAME, num_labels=4)
+    model_v1 = LLMClassifier(MODEL_NAME, num_labels=4).to(DEVICE)
     load_backbone_state_dict(model_v1, get_backbone_state_dict(pretrained_model))
     opt_v1 = torch.optim.AdamW(model_v1.parameters(), lr=args.lr)
     for ep in range(args.epochs):
-        train_epoch(model_v1, train_b, criterion, opt_v1)
-    r1 = evaluate(model_v1, val_b, criterion)
+        train_epoch(model_v1, train_b, criterion, opt_v1, device=str(DEVICE))
+    r1 = evaluate(model_v1, val_b, criterion, device=str(DEVICE))
     print(f"    Accuracy: {r1['accuracy']:.1%}")
 
     # Train variant 2 (higher LR)
     lr2 = args.lr * 3
     print(f"\n  Training variant 2 (lr={lr2:.0e})...")
-    model_v2 = LLMClassifier(MODEL_NAME, num_labels=4)
+    model_v2 = LLMClassifier(MODEL_NAME, num_labels=4).to(DEVICE)
     load_backbone_state_dict(model_v2, get_backbone_state_dict(pretrained_model))
     opt_v2 = torch.optim.AdamW(model_v2.parameters(), lr=lr2)
     for ep in range(args.epochs):
-        train_epoch(model_v2, train_b, criterion, opt_v2)
-    r2 = evaluate(model_v2, val_b, criterion)
+        train_epoch(model_v2, train_b, criterion, opt_v2, device=str(DEVICE))
+    r2 = evaluate(model_v2, val_b, criterion, device=str(DEVICE))
     print(f"    Accuracy: {r2['accuracy']:.1%}")
 
     # Task vector analysis
@@ -556,10 +579,10 @@ def demo_merging(args, pretrained_model, data_b):
     merge_results = {}
 
     def eval_merged(merged_sd, name):
-        merged = LLMClassifier(MODEL_NAME, num_labels=4)
+        merged = LLMClassifier(MODEL_NAME, num_labels=4).to(DEVICE)
         load_backbone_state_dict(merged, merged_sd)
         merged.classifier.load_state_dict(model_v1.classifier.state_dict())
-        r = evaluate(merged, val_b, criterion)
+        r = evaluate(merged, val_b, criterion, device=str(DEVICE))
         merge_results[name] = r
         print(f"    {name:<15} accuracy: {r['accuracy']:.1%}")
 
@@ -609,29 +632,29 @@ def demo_lora_flow(args, pretrained_model, data_b):
 
     # Train LoRA adapter 1
     print(f"\n  Training LoRA adapter 1 (rank={args.lora_rank}, lr={args.lr*5:.0e})...")
-    model_l1 = LLMClassifier(MODEL_NAME, num_labels=4)
+    model_l1 = LLMClassifier(MODEL_NAME, num_labels=4).to(DEVICE)
     load_backbone_state_dict(model_l1, get_backbone_state_dict(pretrained_model))
     LoRAInjector.inject(model_l1, target_modules=target_modules,
                          rank=args.lora_rank, alpha=args.lora_rank * 2)
     opt1 = torch.optim.AdamW(LoRAInjector.get_lora_parameters(model_l1),
                               lr=args.lr * 5)
     for ep in range(args.epochs):
-        train_epoch(model_l1, train_b, criterion, opt1)
-    r1 = evaluate(model_l1, val_b, criterion)
+        train_epoch(model_l1, train_b, criterion, opt1, device=str(DEVICE))
+    r1 = evaluate(model_l1, val_b, criterion, device=str(DEVICE))
     print(f"    Adapter 1 accuracy: {r1['accuracy']:.1%}  "
           f"({LoRAInjector.count_lora_params(model_l1):,} LoRA params)")
 
     # Train LoRA adapter 2 (different LR)
     print(f"\n  Training LoRA adapter 2 (rank={args.lora_rank}, lr={args.lr*2:.0e})...")
-    model_l2 = LLMClassifier(MODEL_NAME, num_labels=4)
+    model_l2 = LLMClassifier(MODEL_NAME, num_labels=4).to(DEVICE)
     load_backbone_state_dict(model_l2, get_backbone_state_dict(pretrained_model))
     LoRAInjector.inject(model_l2, target_modules=target_modules,
                          rank=args.lora_rank, alpha=args.lora_rank * 2)
     opt2 = torch.optim.AdamW(LoRAInjector.get_lora_parameters(model_l2),
                               lr=args.lr * 2)
     for ep in range(args.epochs):
-        train_epoch(model_l2, train_b, criterion, opt2)
-    r2 = evaluate(model_l2, val_b, criterion)
+        train_epoch(model_l2, train_b, criterion, opt2, device=str(DEVICE))
+    r2 = evaluate(model_l2, val_b, criterion, device=str(DEVICE))
     print(f"    Adapter 2 accuracy: {r2['accuracy']:.1%}")
 
     # LoRA Soups: merge adapter weights
@@ -640,7 +663,7 @@ def demo_lora_flow(args, pretrained_model, data_b):
     lora_sd_2 = LoRAInjector.lora_state_dict(model_l2)
     merged_lora = merge_lora_adapters([lora_sd_1, lora_sd_2])
 
-    soup_model = LLMClassifier(MODEL_NAME, num_labels=4)
+    soup_model = LLMClassifier(MODEL_NAME, num_labels=4).to(DEVICE)
     load_backbone_state_dict(soup_model, get_backbone_state_dict(pretrained_model))
     LoRAInjector.inject(soup_model, target_modules=target_modules,
                          rank=args.lora_rank, alpha=args.lora_rank * 2)
@@ -653,21 +676,21 @@ def demo_lora_flow(args, pretrained_model, data_b):
     soup_model.classifier.load_state_dict(model_l1.classifier.state_dict())
     LoRAInjector.merge_all(soup_model)
 
-    r_soup = evaluate(soup_model, val_b, criterion)
+    r_soup = evaluate(soup_model, val_b, criterion, device=str(DEVICE))
     print(f"    LoRA Soup accuracy: {r_soup['accuracy']:.1%}")
 
     # LoRA-Flow: learned gating
     print("\n  LoRA-Flow: training learned gating weights...")
     hidden_size = 768  # distilbert hidden size
-    flow = LoRAFlow(num_adapters=2, gate_input_dim=hidden_size)
+    flow = LoRAFlow(num_adapters=2, gate_input_dim=hidden_size).to(DEVICE)
 
     def adapter_outputs_fn(batch):
-        x = batch[0]
+        x = batch[0].to(DEVICE)
         with torch.no_grad():
             return [model_l1(x), model_l2(x)]
 
     def gate_input_fn(batch):
-        x = batch[0]
+        x = batch[0].to(DEVICE)
         input_ids = x[:, 0, :].long()
         attention_mask = x[:, 1, :].long()
         with torch.no_grad():
@@ -676,7 +699,7 @@ def demo_lora_flow(args, pretrained_model, data_b):
         return out.last_hidden_state[:, 0, :]
 
     def target_fn(batch):
-        return batch[1]
+        return batch[1].to(DEVICE)
 
     flow_history = train_lora_flow(
         flow, adapter_outputs_fn, gate_input_fn,
@@ -691,7 +714,7 @@ def demo_lora_flow(args, pretrained_model, data_b):
     correct = total = 0
     with torch.no_grad():
         for batch in val_b:
-            x, y = batch
+            x, y = batch[0].to(DEVICE), batch[1].to(DEVICE)
             outs = adapter_outputs_fn(batch)
             gate_in = gate_input_fn(batch)
             combined = flow.merge_with_gates(outs, gate_in)
@@ -736,8 +759,8 @@ def main():
     print("  DistilBERT (66M params) + SST-2 Sentiment + AG News Topics")
     print("  From-scratch PyTorch (no PEFT, no HuggingFace Trainer)")
     print("=" * 72)
-    print(f"  seed={args.seed}  epochs={args.epochs}  lr={args.lr}  "
-          f"lora_rank={args.lora_rank}  samples={args.max_samples}")
+    print(f"  device={DEVICE}  seed={args.seed}  epochs={args.epochs}  "
+          f"lr={args.lr}  lora_rank={args.lora_rank}  samples={args.max_samples}")
 
     set_seed(args.seed)
 
@@ -765,12 +788,13 @@ def main():
     else:
         # Need a pretrained model for other phases
         print("\n  Quick-training base sentiment model...")
-        pretrained = LLMClassifier(MODEL_NAME, num_labels=2)
+        pretrained = LLMClassifier(MODEL_NAME, num_labels=2).to(DEVICE)
         opt = torch.optim.AdamW(pretrained.parameters(), lr=args.lr)
         criterion = nn.CrossEntropyLoss()
         for ep in range(args.epochs):
-            train_epoch(pretrained, data_a[0], criterion, opt)
-        r = evaluate(pretrained, data_a[1], criterion)
+            train_epoch(pretrained, data_a[0], criterion, opt,
+                        device=str(DEVICE))
+        r = evaluate(pretrained, data_a[1], criterion, device=str(DEVICE))
         print(f"  Base sentiment accuracy: {r['accuracy']:.1%}")
 
     if args.demo == "all" or args.demo == "cka":
