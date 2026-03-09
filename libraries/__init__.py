@@ -1,18 +1,26 @@
 """
-libraries - Transfer Learning for Classical ML
-================================================
+libraries - Transfer Learning for Classical & Deep Learning
+============================================================
 
 A from-scratch Python library demonstrating that transfer learning
-techniques from deep learning apply to classical linear and logistic
-regression, with measurable CO2 savings.
+techniques apply to both classical ML and deep neural networks,
+with measurable CO2 savings.
 
-Four core transfer approaches:
+Classical ML (linear/logistic regression):
   1. Regularized weight transfer (closed-form / gradient-based)
   2. LoRA-style low-rank adaptation (vector + matrix)
   3. Statistical dataset-to-weight mapping
   4. Bayesian prior transfer (source posterior as target prior)
 
-Plus negative transfer detection (MMD, Proxy A-distance, KS tests)
+Deep Learning (nn.Module-based models):
+  5. LoRA injection for any pretrained model (LoRALinear, LoRAInjector)
+  6. Layer-wise transfer with progressive unfreezing (BaseModel, TransferScheduler)
+  7. Elastic Weight Consolidation for Bayesian transfer (EWCLoss)
+  8. CKA-based negative transfer detection (compute_cka, NegativeTransferMonitor)
+  9. Model merging (SLERP, Task Arithmetic, TIES, DARE, LoRA Soups)
+  10. GPU-aware carbon tracking via NVML (GPUCarbonTracker)
+
+Plus negative transfer detection (MMD, Proxy A-distance, KS, CKA)
 and integrated carbon emissions tracking.
 
 Built for the ASU Principled AI Spark Challenge.
@@ -50,4 +58,36 @@ from .metrics import (
 )
 from .carbon import CarbonTracker, compare_emissions
 
-__version__ = "0.3.0"
+# Deep learning extensions
+from .dl import (
+    LoRALinear,
+    LoRAInjector,
+    BaseModel,
+    TransferScheduler,
+    build_discriminative_lr_groups,
+    compute_fisher_diagonal,
+    EWCLoss,
+    online_ewc_update,
+    compute_cka,
+    extract_representations,
+    compute_representation_mmd,
+    NegativeTransferMonitor,
+    linear_merge,
+    slerp_merge,
+    compute_task_vector,
+    apply_task_vector,
+    task_arithmetic_merge,
+    ties_merge,
+    dare_merge,
+    merge_lora_adapters,
+    LoRAFlow,
+    train_lora_flow,
+    task_vector_stats,
+    task_vector_similarity,
+    GPUCarbonTracker,
+    train_epoch,
+    evaluate,
+    fine_tune,
+)
+
+__version__ = "0.5.0"

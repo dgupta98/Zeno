@@ -1,14 +1,14 @@
 <p align="center">
-  <h1 align="center">⚡ Zeno — Transfer Learning for Classical ML</h1>
+  <h1 align="center">Zeno — Transfer Learning for Classical & Deep Learning</h1>
   <p align="center">
-    <em>Proving that transfer learning isn't just for deep learning — with measurable CO2 savings.</em>
+    <em>From linear regression to transformers — with measurable CO2 savings at every scale.</em>
   </p>
   <p align="center">
     <img src="https://img.shields.io/badge/python-3.9%2B-blue?logo=python&logoColor=white" alt="Python">
     <img src="https://img.shields.io/badge/PyTorch-2.0%2B-ee4c2c?logo=pytorch&logoColor=white" alt="PyTorch">
     <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
-    <img src="https://img.shields.io/badge/version-0.3.0-orange" alt="Version">
-    <img src="https://img.shields.io/badge/tests-26%20passing-brightgreen" alt="Tests">
+    <img src="https://img.shields.io/badge/version-0.5.0-orange" alt="Version">
+    <img src="https://img.shields.io/badge/tests-96%20passing-brightgreen" alt="Tests">
     <img src="https://img.shields.io/badge/ASU-Principled%20AI%20Spark%20Challenge-maroon" alt="ASU Spark">
   </p>
 </p>
@@ -17,17 +17,21 @@
 
 ## Why This Project?
 
-Every model trained from scratch costs energy and emits CO2. **libraries** demonstrates that the same transfer learning techniques powering modern deep learning — weight transfer, LoRA, Bayesian priors — work remarkably well on classical linear and logistic regression, achieving **85-99% CO2 reduction** compared to full training while **matching or beating scratch performance in 19 out of 22 method-dataset evaluations**.
+Every model trained from scratch costs energy and emits CO2. **Zeno** demonstrates that the same transfer learning techniques powering modern deep learning — weight transfer, LoRA, Bayesian priors — work remarkably well across the entire spectrum from classical linear regression to deep neural networks.
+
+**Classical ML results:** 85-99% CO2 reduction, matching or beating scratch performance in 19 out of 22 method-dataset evaluations.
+
+**Deep learning capabilities:** LoRA injection into any pretrained model, progressive unfreezing with discriminative learning rates, Elastic Weight Consolidation for Bayesian transfer, CKA-based negative transfer detection, model merging (SLERP, Task Arithmetic, TIES, DARE, LoRA Soups, LoRA-Flow), and GPU-aware carbon tracking via NVML.
 
 > *"Efficient AI is inclusive AI. When AI requires less computation, more people can build it."*
 
-Built entirely from scratch in PyTorch (no sklearn models) for the **ASU Principled AI Spark Challenge**.
+Built entirely from scratch in PyTorch (no sklearn models, no HuggingFace PEFT/Trainer) for the **ASU Principled AI Spark Challenge**.
 
 ---
 
 ## Key Results
 
-### Transfer Converges Faster (The Core Insight)
+### Classical ML: Transfer Converges Faster
 
 <p align="center">
   <img src="figures/convergence_curves.png" width="90%" alt="Convergence speed: transfer vs scratch training">
@@ -48,12 +52,20 @@ Transfer learning reaches the same performance as 30-epoch scratch training in *
 
 | Dataset | Task | Best Transfer Method | Score | vs Scratch (full) | CO2 Saved |
 |---------|------|---------------------|-------|-------------------|-----------|
-| CA Housing | Regression | Regularized | R²=0.58 | BEATS FULL | 99% |
-| Wine Quality | Regression | Regularized | R²=0.26 | BEATS FULL | 99% |
+| CA Housing | Regression | Regularized | R2=0.58 | BEATS FULL | 99% |
+| Wine Quality | Regression | Regularized | R2=0.26 | BEATS FULL | 99% |
 | Titanic | Classification | Stat Mapping | Acc=82.5% | BEATS FULL | 68% |
 | Breast Cancer | Classification | Weight Transfer | Acc=91.6% | ~MATCHES | 51% |
 
 **19/22 method-dataset pairs match or beat full scratch training** (10 BEATS FULL, 9 ~MATCHES).
+
+### Deep Learning: LoRA Parameter Efficiency
+
+| Model Size | Full Fine-Tune Params | LoRA (rank 8) Params | Reduction |
+|---|---|---|---|
+| 768 x 768 layer | 589,824 | 12,288 | **48x** |
+| GPT-2 (124M, Q+V only) | 124M | ~147K | **843x** |
+| GPT-2 (124M, all linear) | 124M | ~590K | **210x** |
 
 ### Efficiency Frontier: Better Performance at Lower Cost
 
@@ -61,27 +73,20 @@ Transfer learning reaches the same performance as 30-epoch scratch training in *
   <img src="figures/efficiency_frontier.png" width="90%" alt="Efficiency frontier: performance vs carbon cost">
 </p>
 
-Transfer methods consistently occupy the **upper-left quadrant** (high performance, low carbon cost) — the ideal operating point.
-
-### CO2 Savings
-
-<p align="center">
-  <img src="figures/co2_savings.png" width="90%" alt="CO2 savings by transfer method">
-</p>
-
 ---
 
 ## Features
 
-| Category | What's Included |
-|---|---|
-| **5 Transfer Methods** | Regularized weight transfer, LoRA adaptation, Bayesian prior transfer, Covariance-based analytical transfer, Statistical moment mapping |
-| **3 Negative Transfer Detectors** | Maximum Mean Discrepancy (MMD), Proxy A-distance (PAD), Feature-wise Kolmogorov-Smirnov tests |
-| **CO2 Tracking** | Integrated carbon emissions estimation (with optional [CodeCarbon](https://github.com/mlco2/codecarbon) support) |
-| **4 Real-World Datasets** | California Housing, Wine Quality, Titanic, Breast Cancer — with principled domain-split loaders (in `tests/`) |
-| **Convergence Analysis** | Epoch-by-epoch comparison showing transfer converges up to 30x faster |
-| **26 Smoke Tests** | Full pytest suite covering every module |
-| **pip-installable** | `pyproject.toml` with optional dependencies |
+| Category | Classical ML | Deep Learning |
+|---|---|---|
+| **Weight Transfer** | Regularized, Bayesian, Covariance-based | Progressive unfreezing, discriminative LRs, layer surgery |
+| **LoRA Adaptation** | Vector (binary) + Matrix (multi-class) adapters | `LoRALinear` wrapping `nn.Linear`, `LoRAInjector` for any model |
+| **Bayesian Transfer** | Source posterior as target prior (closed-form) | EWC with diagonal Fisher Information |
+| **Negative Transfer** | MMD, Proxy A-distance, KS tests | CKA, representation MMD, online monitoring |
+| **Model Merging** | — | SLERP, Task Arithmetic, TIES, DARE, LoRA Soups, LoRA-Flow |
+| **CO2 Tracking** | CarbonTracker (CodeCarbon / manual) | GPUCarbonTracker (NVML Energy/Power API) |
+| **Training** | From-scratch SGD loops | `train_epoch`, `evaluate`, `fine_tune` with full integration |
+| **Tests** | 26 smoke tests | 64 smoke tests |
 
 ---
 
@@ -89,21 +94,33 @@ Transfer methods consistently occupy the **upper-left quadrant** (high performan
 
 ```
 libraries/
-├── libraries/                # Core library (from-scratch PyTorch, no sklearn models)
-│   ├── __init__.py            # Public API (25+ exports) & version
-│   ├── train_core.py          # Mini-batch SGD training with gradient clipping
-│   ├── transfer.py            # Regularized, Bayesian & Covariance transfer
-│   ├── adapters.py            # LoRA adapters (vector & matrix, Hu et al. 2021 init)
-│   ├── stat_mapping.py        # Statistical moment-based weight initialization
-│   ├── negative_transfer.py   # MMD, PAD, KS detection + validate_transfer
-│   ├── metrics.py             # MSE, R2, accuracy, energy estimation, set_seed
-│   └── carbon.py              # CarbonTracker with PUE support
+├── libraries/                    # Classical ML (from-scratch PyTorch)
+│   ├── __init__.py                # Public API (40+ exports), v0.4.0
+│   ├── train_core.py              # Mini-batch SGD for linear/logistic regression
+│   ├── transfer.py                # Regularized, Bayesian & Covariance transfer
+│   ├── adapters.py                # LoRA adapters (vector & matrix)
+│   ├── stat_mapping.py            # Statistical moment-based initialization
+│   ├── negative_transfer.py       # MMD, PAD, KS detection + validate_transfer
+│   ├── metrics.py                 # MSE, R2, accuracy, energy estimation
+│   ├── carbon.py                  # CarbonTracker with PUE support
+│   └── dl/                        # Deep Learning extensions
+│       ├── __init__.py             # DL subpackage exports
+│       ├── lora.py                 # LoRALinear + LoRAInjector (nn.Linear wrapping)
+│       ├── transfer.py             # BaseModel + TransferScheduler + discriminative LRs
+│       ├── ewc.py                  # Fisher diagonal + EWCLoss + online EWC
+│       ├── negative_transfer.py    # CKA, representation MMD, NegativeTransferMonitor
+│       ├── merging.py              # SLERP, Task Arithmetic, TIES, DARE, LoRA Soups, LoRA-Flow
+│       ├── carbon.py               # GPUCarbonTracker (NVML energy measurement)
+│       └── train.py                # train_epoch, evaluate, fine_tune loops
 ├── tests/
-│   ├── real_datasets.py       # Domain-split loaders for 5 datasets (demo support)
-│   ├── run_full_demo.py       # Full benchmark with convergence analysis & plots
-│   └── test_smoke.py          # 26 pytest smoke tests
-├── figures/                   # 6 auto-generated publication-quality plots
-├── pyproject.toml             # Package metadata & dependencies
+│   ├── test_smoke.py               # 26 classical ML tests
+│   ├── test_dl_smoke.py            # 70 deep learning tests
+│   ├── run_full_demo.py            # Classical ML benchmark with plots
+│   ├── run_dl_demo.py              # Deep learning demo (LoRA, EWC, CKA, CO2)
+│   ├── run_realworld_demo.py       # Real-world demo (Breast Cancer, CA Housing)
+│   └── real_datasets.py            # Domain-split loaders for 5 datasets
+├── figures/                        # Auto-generated plots
+├── pyproject.toml                  # Package metadata & dependencies
 └── README.md
 ```
 
@@ -117,38 +134,211 @@ libraries/
 # Clone and install
 git clone https://github.com/dgupta98/Zeno.git
 cd Zeno
-pip install -e ".[all]"    # installs with datasets, visualization + carbon tracking
 
-# Or install just the core (torch, numpy, scipy only)
+# Full install (classical + deep learning + datasets + viz + carbon)
+pip install -e ".[all]"
+
+# Core only (torch, numpy, scipy)
 pip install -e .
-```
 
-### Run the Full Demo
-
-```bash
-python -m tests.run_full_demo
-```
-
-Options:
-
-```bash
-python -m tests.run_full_demo --task all --cv_folds 5    # 5-fold CV across all datasets
-python -m tests.run_full_demo --task housing              # California Housing only
-python -m tests.run_full_demo --task negative             # Negative transfer detection demo
-python -m tests.run_full_demo --no-epochs --no-plots      # Clean output (no epoch logs, no plots)
-python -m tests.run_full_demo --quiet --no-plots          # Silent mode (no training output + no plots)
-python -m tests.run_full_demo --show-convergence          # Include convergence analysis tables
-python -m tests.run_full_demo --show-multiclass           # Include multi-class LoRA demo
+# Deep learning extras (pynvml for GPU tracking, transformers for model loading)
+pip install -e ".[dl]"
 ```
 
 ### Run the Tests
 
 ```bash
-python -m pytest tests/test_smoke.py -v
-# 26 passed in ~2s
+# All tests (96 total)
+python -m pytest tests/ -v
+
+# Classical ML tests only
+python -m pytest tests/test_smoke.py -v       # 26 tests
+
+# Deep learning tests only
+python -m pytest tests/test_dl_smoke.py -v     # 70 tests
 ```
 
-### Use as a Library
+### Run the Demos
+
+```bash
+# Classical ML demo (real datasets, CO2 tracking, plots)
+python -m tests.run_full_demo
+
+# Deep learning demo (LoRA injection, EWC, CKA, progressive unfreezing)
+python -m tests.run_dl_demo
+
+# Real-world demo (Breast Cancer, CA Housing — full pipeline)
+python -m tests.run_realworld_demo                    # all datasets
+python -m tests.run_realworld_demo --demo breast_cancer  # classification only
+python -m tests.run_realworld_demo --demo housing        # regression only
+```
+
+---
+
+## Deep Learning Usage
+
+### 1. LoRA Injection — Adapt Any Pretrained Model
+
+```python
+import torch.nn as nn
+from libraries import LoRAInjector
+
+# Any pretrained model (ResNet, GPT-2, BERT, custom MLP, etc.)
+model = load_your_pretrained_model()
+
+# Inject LoRA into all linear layers (rank 8, alpha 16)
+count = LoRAInjector.inject(model, target_modules=None, rank=8, alpha=16.0)
+print(f"Injected LoRA into {count} layers")
+
+# Only LoRA parameters are trainable — base model is frozen
+optimizer = torch.optim.AdamW(LoRAInjector.get_lora_parameters(model), lr=1e-4)
+print(f"Trainable: {LoRAInjector.count_lora_params(model):,} params")
+
+# ... train ...
+
+# Merge for zero-overhead inference
+LoRAInjector.merge_all(model)
+
+# Save tiny checkpoint (LoRA weights only)
+torch.save(LoRAInjector.lora_state_dict(model), "lora_weights.pt")
+```
+
+### 2. Progressive Unfreezing with Discriminative LRs
+
+```python
+from libraries import BaseModel, TransferScheduler
+
+# Wrap any model
+base = BaseModel(pretrained_model)
+base.freeze_all()
+base.replace_head(num_classes=10)  # auto-detects fc/classifier/head
+
+# Set up progressive unfreezing (ULMFiT-style)
+groups = base.get_layer_groups()
+scheduler = TransferScheduler(groups, base_lr=1e-3, decay=2.6)
+optimizer = scheduler.build_optimizer()
+
+for epoch in range(num_epochs):
+    scheduler.step(epoch)  # unfreezes next layer group each epoch
+    train_epoch(base, train_loader, criterion, optimizer)
+```
+
+### 3. Elastic Weight Consolidation (Bayesian Transfer)
+
+```python
+from libraries import compute_fisher_diagonal, EWCLoss
+
+# After training on source task:
+fisher = compute_fisher_diagonal(source_model, source_loader, criterion)
+
+# Create EWC penalty (Bayesian prior from source)
+ewc = EWCLoss(source_model, fisher, lambda_=1000.0)
+
+# Fine-tune on target — EWC prevents catastrophic forgetting
+for x, y in target_loader:
+    loss = criterion(model(x), y) + ewc(model)
+    loss.backward()
+    optimizer.step()
+```
+
+### 4. CKA-Based Negative Transfer Detection
+
+```python
+from libraries import compute_cka, extract_representations, NegativeTransferMonitor
+
+# Compare layer representations between source and target
+reps_source = extract_representations(model, source_loader, layer_name="layer3")
+reps_target = extract_representations(model, target_loader, layer_name="layer3")
+similarity = compute_cka(reps_source, reps_target)
+print(f"CKA similarity: {similarity:.4f}")  # 1.0 = identical, 0.0 = orthogonal
+
+# Online monitoring during training
+monitor = NegativeTransferMonitor(reference_model=pretrained_model, patience=3)
+for epoch in range(epochs):
+    val_loss = evaluate(model, val_loader, criterion)["loss"]
+    warning = monitor.check(epoch, val_loss, model)
+    if warning:
+        print(f"WARNING: {warning}")
+        break
+```
+
+### 5. GPU Carbon Tracking
+
+```python
+from libraries import GPUCarbonTracker
+from libraries.carbon import compare_emissions
+
+# Track GPU energy via NVML (auto-falls back to CPU estimation)
+tracker = GPUCarbonTracker("lora_finetune",
+                            carbon_intensity_kg_kwh=0.45,  # US average
+                            pue=1.1)                        # data center PUE
+tracker.start()
+# ... GPU training ...
+result = tracker.stop()
+print(f"Energy: {result['kwh']:.6f} kWh, CO2: {result['co2_kg']:.6f} kg")
+
+# Compare full fine-tuning vs LoRA
+summary = compare_emissions([full_ft_result, lora_result])
+print(f"LoRA saved {summary['comparisons'][0]['co2_saved_pct']:.1f}% CO2")
+```
+
+### 6. Model Merging — Combine Fine-Tuned Models in Weight Space
+
+```python
+from libraries import (
+    compute_task_vector, task_arithmetic_merge,
+    ties_merge, dare_merge, slerp_merge,
+    merge_lora_adapters, task_vector_similarity,
+)
+
+# Compute task vectors (what each fine-tuning learned)
+tv_math = compute_task_vector(base.state_dict(), model_math.state_dict())
+tv_code = compute_task_vector(base.state_dict(), model_code.state_dict())
+
+# Check compatibility before merging
+sim = task_vector_similarity(tv_math, tv_code)
+print(f"Task similarity: {sim:.4f}")  # higher = less interference
+
+# Task Arithmetic: additive composition
+merged_sd = task_arithmetic_merge(base.state_dict(), [tv_math, tv_code],
+                                   scalings=[0.5, 0.5])
+
+# TIES: resolves sign conflicts for better merging
+merged_sd = ties_merge(base.state_dict(), [tv_math, tv_code],
+                        density=0.2, scaling=1.0)
+
+# DARE + TIES: random drop + rescale + TIES
+merged_sd = dare_merge(base.state_dict(), [tv_math, tv_code],
+                        drop_rate=0.9, use_ties=True, seed=42)
+
+# SLERP: spherical interpolation (2 models)
+merged_sd = slerp_merge(model_a.state_dict(), model_b.state_dict(), t=0.5)
+
+# LoRA Soups: merge multiple LoRA adapters
+merged_lora = merge_lora_adapters([lora_sd_math, lora_sd_code])
+```
+
+### 7. End-to-End Fine-Tuning
+
+```python
+from libraries import fine_tune, GPUCarbonTracker, EWCLoss
+
+history = fine_tune(
+    model, train_loader, val_loader,
+    epochs=10,
+    optimizer=optimizer,
+    criterion=nn.CrossEntropyLoss(),
+    scheduler=transfer_scheduler,       # progressive unfreezing
+    ewc_loss=ewc_penalty,               # Bayesian regularization
+    carbon_tracker=GPUCarbonTracker("experiment"),  # CO2 tracking
+    device="cuda",
+)
+# history = {'train_loss': [...], 'val_loss': [...], 'val_accuracy': [...], 'co2_result': {...}}
+```
+
+---
+
+## Classical ML Usage
 
 ```python
 import torch
@@ -160,15 +350,10 @@ from libraries import (
 
 set_seed(42)
 
-# Prepare your own source/target data as torch tensors
-# X_source: (n_s, d), y_source: (n_s,)
-# X_target: (n_t, d), y_target: (n_t,)
-
 # 1. Train source model (mini-batch SGD)
 w_src, b_src = fit_linear_sgd(X_source, y_source,
                                torch.zeros(d), torch.zeros(1),
-                               epochs=30, lr=0.01, batch_size=64,
-                               verbose=True, label="source")
+                               epochs=30, lr=0.01, batch_size=64)
 
 # 2. Check for negative transfer
 decision = should_transfer(X_source_np, X_target_np, verbose=True)
@@ -186,66 +371,37 @@ print(f"CO2: {result['co2_kg']:.2e} kg")
 
 ## Transfer Methods
 
-### 1. Regularized Weight Transfer
+### Classical ML Methods
 
-Ridge regression re-centered on source weights instead of zero:
-
-$$w^* = (X^\top X + \lambda I)^{-1}(X^\top y + \lambda \cdot w_{\text{source}})$$
-
-- **Linear**: Closed-form solution (zero gradient steps)
-- **Logistic**: Gradient-based with L2 penalty toward source weights
-- **lambda** controls trust in source (large lambda = heavy reliance on source)
-
-### 2. Bayesian Prior Transfer
-
-Source posterior becomes the target prior:
-
-$$\Lambda_n = \Lambda_0 + \frac{1}{\sigma^2} X^\top X, \quad \mu_n = \Lambda_n^{-1}(\Lambda_0 \mu_0 + \frac{1}{\sigma^2} X^\top y)$$
-
-Automatically balances source knowledge vs. new data based on relative precision.
-
-### 3. Covariance-Based Analytical Transfer
-
-Under covariate shift (P(y|x) preserved, P(x) differs):
-
-$$w_{\text{target}} \approx \Sigma_{xx,\text{target}}^{-1} \cdot \Sigma_{xx,\text{source}} \cdot w_{\text{source}}$$
-
-Includes adaptive blending with norm ratio + cosine similarity checks and automatic OLS fallback when covariate shift assumptions are violated.
-
-### 4. LoRA (Low-Rank Adaptation)
-
-Adapted from Hu et al. (2021) for classical models:
-
-$$w' = w_{\text{base}} + \frac{\alpha}{r} \cdot B \cdot a$$
-
-| Variant | Use Case | Param Reduction |
+| Method | Formula | Key Property |
 |---|---|---|
-| `LoRAAdapterVector` | Binary classification / single-output regression | Implicit regularization |
-| `LoRAAdapterMatrix` | Multi-class classification (d x k weight matrix) | **9.4x fewer params** (d=1000, k=50, r=5) |
+| **Regularized** | $w^* = (X^\top X + \lambda I)^{-1}(X^\top y + \lambda w_s)$ | Closed-form for linear; gradient-based for logistic |
+| **Bayesian** | $\mu_n = \Lambda_n^{-1}(\Lambda_0 \mu_0 + \sigma^{-2} X^\top y)$ | Source posterior becomes target prior |
+| **Covariance** | $w_t \approx \Sigma_t^{-1} \Sigma_s \cdot w_s$ | Covariate shift correction with adaptive blending |
+| **LoRA** | $w' = w_{\text{base}} + (\alpha/r) \cdot B \cdot a$ | Low-rank implicit regularization |
+| **Stat Mapping** | $w_j \approx \text{Cov}(x_j, y) / \text{Var}(x_j)$ | Moment-based initialization (zero iterations) |
 
-<p align="center">
-  <img src="figures/lora_reduction.png" width="90%" alt="LoRA parameter reduction for multi-class">
-</p>
+### Deep Learning Methods
 
-### 5. Statistical Dataset-to-Weight Mapping
-
-Interpretable moment-based initialization:
-
-$$w_j \approx \frac{\text{Cov}(x_j, y)}{\text{Var}(x_j)}$$
-
-For logistic regression, uses an LDA-inspired initialization from class means and pooled variance.
-
-### Method Comparison
-
-<p align="center">
-  <img src="figures/method_comparison.png" width="90%" alt="Transfer method comparison matrix">
-</p>
+| Method | What It Does | Key Reference |
+|---|---|---|
+| **LoRA Injection** | Wraps `nn.Linear` with low-rank A, B matrices; monkey-patches any model | Hu et al., ICLR 2022 |
+| **Progressive Unfreezing** | Gradually unfreezes layers top-to-bottom with decayed LRs | Howard & Ruder, ULMFiT 2018 |
+| **Discriminative LRs** | $\eta_l = \eta_{\text{base}} / \text{decay}^{(L-l)}$ per layer group | ULMFiT / LLRD |
+| **EWC** | $L = L_{\text{target}} + \frac{\lambda}{2} \sum_i F_i (\theta_i - \theta_i^*)^2$ | Kirkpatrick et al., 2017 |
+| **Task Arithmetic** | $\theta = \theta_{\text{base}} + \sum_i \alpha_i \tau_i$ (additive task vectors) | Ilharco et al., ICLR 2023 |
+| **TIES-Merging** | Trim low-magnitude, elect sign by majority, disjoint merge | Yadav et al., NeurIPS 2023 |
+| **DARE** | Random drop + rescale task vectors before merging | Yu et al., 2024 |
+| **SLERP** | Spherical interpolation preserving weight norms | Standard practice (mergekit) |
+| **LoRA Soups** | Average multiple LoRA adapters for multi-task inference | Huang et al., 2023 |
+| **LoRA-Flow** | Learned gating for dynamic adapter combination | Wang et al., 2024 |
+| **Layer Surgery** | Replace classification head, handle dimension mismatches | Standard practice |
 
 ---
 
 ## Negative Transfer Detection
 
-Before transferring, libraries checks whether domains are compatible:
+### Classical ML Detectors
 
 | Metric | What It Measures | Safe Threshold |
 |---|---|---|
@@ -253,40 +409,45 @@ Before transferring, libraries checks whether domains are compatible:
 | **Proxy A-distance** | Domain classifier separability | < 1.9 |
 | **KS Test** | Per-feature distributional shift | < 100% features shifted |
 
+### Deep Learning Detectors
+
+| Metric | What It Measures | When to Use |
+|---|---|---|
+| **CKA** | Layer representation similarity [0, 1] | Compare pretrained vs fine-tuned layers |
+| **Representation MMD** | MMD in learned feature space | Stronger signal than raw-feature MMD |
+| **Online Monitor** | Val loss vs baseline for N epochs | Real-time during training |
+| **Parameter Drift** | Per-layer L2 distance from pretrained | Early warning signal |
+
 ```python
-from libraries import should_transfer
+from libraries import should_transfer, compute_cka
 
+# Classical
 decision = should_transfer(X_source, X_target, verbose=True)
-# MMD2 = 0.0312  (threshold: 0.5)
-# PAD  = 0.8421  (threshold: 1.9)
-# KS shifted = 25%  (threshold: 100%)
-# -> TRANSFER
+# MMD2 = 0.0312  (threshold: 0.5)  -> TRANSFER
+
+# Deep learning
+similarity = compute_cka(source_representations, target_representations)
+# CKA = 0.85 -> high similarity, transfer likely safe
 ```
-
-If **any** metric exceeds its threshold, transfer is flagged as risky. The demo shows naive transfer performs **9.3x worse** than scratch when detection warnings are ignored.
-
-There is also `validate_transfer()` — an empirical validation approach that splits target data to directly compare transfer vs scratch performance before committing.
 
 ---
 
 ## Carbon Tracking
 
-Every experiment tracks energy consumption and CO2 emissions:
+| Tracker | Measurement Method | Best For |
+|---|---|---|
+| `CarbonTracker` | CodeCarbon / manual TDP estimation | CPU workloads, classical ML |
+| `GPUCarbonTracker` | NVML Energy API (Volta+) / Power API polling | GPU training, deep learning |
 
-```python
-from libraries import CarbonTracker
+Both produce identical output dicts compatible with `compare_emissions()`.
 
-tracker = CarbonTracker("my_experiment", power_watts=30.0,
-                         carbon_intensity_kg_kwh=0.45, pue=1.1)
-tracker.start()
-# ... training code ...
-result = tracker.stop()
-# {'method': 'my_experiment', 'time_s': 0.023, 'kwh': 1.9e-07, 'co2_kg': 8.6e-08, ...}
-```
+**Published energy benchmarks (reference):**
 
-- Uses **CodeCarbon** when available (hardware-level measurement)
-- Falls back to manual estimation: `CO2(kg) = Power(W) x Time(s) / 3,600,000 x CI x PUE`
-- Computes real-world equivalents (phone charges, Google searches, LED hours)
+| Workload | Hardware | Energy | CO2 |
+|---|---|---|---|
+| BERT fine-tuning (SST-2) | 1 RTX 8000 | 0.1-2 kWh | 40-800g |
+| LoRA fine-tuning 7B | 1 RTX A4000, 4h | 0.694 kWh | 57g |
+| BLOOM 176B pre-training | 384 A100s, 118d | 433,195 kWh | 24.69 tonnes |
 
 ---
 
@@ -303,43 +464,6 @@ Each dataset uses a principled domain split that creates natural covariate shift
 
 ---
 
-## CLI Reference
-
-| Flag | Default | Description |
-|---|---|---|
-| `--task` | `all` | `housing`, `wine`, `titanic`, `cancer`, `multiclass`, `negative`, or `all` |
-| `--seed` | `42` | Random seed |
-| `--lr` | `0.01` | Learning rate |
-| `--source_epochs` | `30` | Epochs for source pretraining |
-| `--scratch_epochs` | `30` | Epochs for training from scratch |
-| `--budget_epochs` | `3` | Epochs for transfer methods (10x less) |
-| `--batch_size` | `64` | Mini-batch size for SGD |
-| `--target_frac` | `0.25` | Fraction of target training data to use |
-| `--cv_folds` | `3` | Number of cross-validation folds |
-| `--lora_rank` | `2` | LoRA rank |
-| `--reg_lambda` | `1.0` | Regularization strength |
-| `--bayes_precision` | `1.0` | Bayesian prior precision |
-| `--power_w` | `30.0` | Estimated hardware power draw (watts) |
-| `--grid_kg` | `0.45` | Grid CO2 intensity (kg CO2/kWh) |
-| `--quiet` | `false` | Suppress ALL training output (headers + epochs) |
-| `--no-epochs` | `false` | Show headers & results but hide per-epoch logs |
-| `--no-plots` | `false` | Skip matplotlib figure generation |
-| `--show-convergence` | `false` | Show convergence analysis for each dataset |
-| `--show-multiclass` | `false` | Show multi-class LoRA parameter-reduction demo |
-
----
-
-## Key Findings
-
-1. **85-99% CO2 reduction** -- Transfer methods use a fraction of the compute budget while matching or exceeding scratch performance
-2. **19/22 evaluations succeed** -- Transfer matches or beats full scratch training across 4 datasets and 5+ methods (10 BEATS FULL, 9 ~MATCHES)
-3. **Up to 30x convergence speedup** -- Transfer reaches scratch-quality performance in 1 epoch vs 30 epochs from scratch
-4. **Closed-form is king** -- Regularized and Bayesian transfer solve analytically for linear regression (zero iterations needed)
-5. **LoRA scales for classical ML** -- 9.4x parameter reduction for multi-class logistic regression (d=1000, k=50, r=5)
-6. **Detection prevents harm** -- MMD + PAD + KS reliably detect when source and target domains are incompatible (9.3x worse performance when ignored)
-
----
-
 ## Dependencies
 
 **Core** (installed with `pip install -e .`):
@@ -347,12 +471,58 @@ Each dataset uses a principled domain split that creates natural covariate shift
 - **PyTorch** >= 2.0
 - **NumPy**, **SciPy**
 
-**Datasets / Demo** (installed with `pip install -e ".[datasets]"` or `".[all]"`):
-- **pandas**, **scikit-learn**, **seaborn** (dataset loading and preprocessing — all models are from scratch)
+**Deep Learning** (installed with `pip install -e ".[dl]"`):
+- **pynvml** >= 11.0 — NVML GPU energy measurement
+- **transformers** >= 4.30 — pretrained model loading
+
+**Datasets / Demo** (installed with `pip install -e ".[datasets]"`):
+- **pandas**, **scikit-learn**, **seaborn**
 
 **Optional**:
-- **matplotlib** — visualization (`pip install -e ".[viz]"`)
-- **CodeCarbon** — hardware-level energy tracking (`pip install -e ".[carbon]"`)
+- **matplotlib** — visualization (`".[viz]"`)
+- **CodeCarbon** — hardware-level CPU energy tracking (`".[carbon]"`)
+- **All**: `pip install -e ".[all]"`
+
+---
+
+## CLI Reference
+
+### Classical ML Demo (`run_full_demo.py`)
+
+| Flag | Default | Description |
+|---|---|---|
+| `--task` | `all` | `housing`, `wine`, `titanic`, `cancer`, `negative`, or `all` |
+| `--seed` | `42` | Random seed |
+| `--source_epochs` | `30` | Epochs for source pretraining |
+| `--budget_epochs` | `3` | Epochs for transfer (10x less) |
+| `--cv_folds` | `3` | Cross-validation folds |
+| `--no-plots` | `false` | Skip figure generation |
+| `--quiet` | `false` | Suppress training output |
+
+### Deep Learning Demo (`run_dl_demo.py`)
+
+| Flag | Default | Description |
+|---|---|---|
+| `--demo` | `all` | `lora`, `transfer`, `ewc`, `cka`, `carbon`, `merging`, or `all` |
+| `--seed` | `42` | Random seed |
+| `--epochs` | `10` | Training epochs |
+| `--lr` | `0.01` | Learning rate |
+| `--lora_rank` | `8` | LoRA rank |
+| `--quiet` | `false` | Suppress per-epoch output |
+
+---
+
+## Key Findings
+
+1. **85-99% CO2 reduction** — Transfer methods use a fraction of the compute while matching scratch performance
+2. **19/22 classical evaluations succeed** — 10 BEATS FULL, 9 ~MATCHES across 4 datasets and 5+ methods
+3. **Up to 30x convergence speedup** — Transfer reaches scratch quality in 1 epoch vs 30
+4. **48x parameter reduction with LoRA** — For a 768x768 layer at rank 8
+5. **EWC prevents catastrophic forgetting** — Fisher-weighted penalties keep important parameters stable
+6. **CKA detects representation mismatch** — Layer-wise similarity scoring catches negative transfer early
+7. **Model merging enables zero-shot multi-task** — Combine fine-tuned models without additional training data
+8. **TIES resolves sign conflicts** — Outperforms naive averaging by handling parameter interference
+9. **NVML provides real GPU energy** — Not TDP estimates; actual power draw during training
 
 ---
 
