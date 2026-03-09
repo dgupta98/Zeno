@@ -47,9 +47,7 @@ from libraries.metrics import set_seed
 from libraries.dl.lora import LoRAInjector
 from libraries.dl.transfer import BaseModel, TransferScheduler
 from libraries.dl.ewc import compute_fisher_diagonal, EWCLoss
-from libraries.dl.negative_transfer import (
-    compute_cka, extract_representations, NegativeTransferMonitor,
-)
+from libraries.dl.negative_transfer import compute_cka
 from libraries.dl.carbon import GPUCarbonTracker
 from libraries.dl.train import train_epoch, evaluate, fine_tune
 from libraries.dl.merging import (
@@ -96,7 +94,25 @@ class LLMClassifier(nn.Module):
     def __init__(self, model_name, num_labels):
         super().__init__()
         from transformers import AutoModel
-        self.transformer = AutoModel.from_pretrained(model_name)
+        # Suppress safetensors LOAD REPORT — the "UNEXPECTED" keys are MLM-head
+        # weights (vocab_layer_norm, vocab_projector, vocab_transform) present in
+        # the distilbert-base-uncased checkpoint but not needed by the encoder-only
+        # DistilBertModel. This is expected and harmless.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        _old_out = os.dup(1)
+        _old_err = os.dup(2)
+        _devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(_devnull, 1)
+        os.dup2(_devnull, 2)
+        try:
+            self.transformer = AutoModel.from_pretrained(model_name)
+        finally:
+            os.dup2(_old_out, 1)
+            os.dup2(_old_err, 2)
+            os.close(_devnull)
+            os.close(_old_out)
+            os.close(_old_err)
         hidden = self.transformer.config.hidden_size  # 768 for distilbert
         self.classifier = nn.Sequential(
             nn.Dropout(0.1),
@@ -199,6 +215,46 @@ TASK_A_NAME = "SST-2 Sentiment (pos/neg)"
 TASK_B_NAME = "AG News Topics (4 classes)"
 
 
+def _detect_gpu_power():
+    """Detect real GPU TDP via NVML, fallback to manual estimate."""
+    if torch.cuda.is_available():
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            # Power limit in milliwatts
+            power_mw = pynvml.nvmlDeviceGetEnforcedPowerLimit(handle)
+            name = pynvml.nvmlDeviceGetName(handle)
+            if isinstance(name, bytes):
+                name = name.decode()
+            return power_mw / 1000.0, name  # watts, name
+        except Exception:
+            # Try torch for GPU name
+            name = torch.cuda.get_device_name(0)
+            # Common TDPs
+            tdp_map = {"T4": 70, "V100": 300, "A100": 400, "A10": 150,
+                        "RTX 3090": 350, "RTX 4090": 450, "L4": 72}
+            for key, watts in tdp_map.items():
+                if key in name:
+                    return float(watts), name
+            return 70.0, name  # conservative default
+    return 30.0, "CPU"  # CPU fallback
+
+
+GPU_POWER_WATTS, GPU_NAME = _detect_gpu_power()
+
+# Accumulated CO2 results for final summary
+_carbon_log = []
+
+# Accumulated results for final summary table
+_summary_rows = []
+
+
+def _make_tracker(label):
+    """Create a GPUCarbonTracker with real GPU power."""
+    return GPUCarbonTracker(label, power_watts=GPU_POWER_WATTS)
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Phase 1: Fine-tune on Sentiment + Carbon Tracking
 # ═══════════════════════════════════════════════════════════════════
@@ -218,7 +274,7 @@ def demo_finetune(args, tokenizer, data_a, data_b):
     total_params = sum(p.numel() for p in model.parameters())
     print(f"  Total parameters: {total_params:,}")
 
-    tracker = GPUCarbonTracker("full_finetune", power_watts=30.0)
+    tracker = _make_tracker("full_finetune")
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
     print(f"\n  Training for {args.epochs} epochs...")
@@ -229,15 +285,58 @@ def demo_finetune(args, tokenizer, data_a, data_b):
     )
 
     result = evaluate(model, val_a, criterion, device=str(DEVICE))
+    co2 = history['co2_result']
     print(f"\n  Final sentiment accuracy: {result['accuracy']:.1%}")
-    print(f"  CO2 emitted: {history['co2_result']['co2_kg']:.2e} kg")
+    print(f"  CO2: {co2['co2_kg']:.2e} kg  ({co2['source']} measurement, "
+          f"{co2['power_watts']:.0f}W avg)")
 
+    _carbon_log.append(co2)
+    _summary_rows.append(("Phase 1", "Full Fine-tune", "SST-2",
+                           result['accuracy'], f"{total_params:,} params"))
     return model, history
 
 
 # ═══════════════════════════════════════════════════════════════════
 # Phase 2: CKA Representation Similarity
 # ═══════════════════════════════════════════════════════════════════
+
+def _extract_cls_representations(model, dataloader, layer_name, device="cpu"):
+    """
+    Extract [CLS]-pooled representations from a transformer layer.
+
+    Standard extract_representations flattens (batch, seq_len, hidden) into
+    (batch, seq_len*hidden) which creates a huge seq_len*hidden x seq_len*hidden
+    CKA matrix (49K x 49K for DistilBERT — OOM on 15GB GPU).
+
+    This version takes only the [CLS] token (index 0) output, giving
+    (batch, hidden) and a manageable 768 x 768 CKA matrix.
+    """
+    model.eval()
+    model.to(device)
+
+    target_module = dict(model.named_modules()).get(layer_name)
+    if target_module is None:
+        raise ValueError(f"Layer '{layer_name}' not found in model")
+
+    activations = []
+
+    def hook_fn(module, input, output):
+        out = output[0] if isinstance(output, tuple) else output
+        if out.dim() == 3:
+            # Transformer output: (batch, seq_len, hidden) → take [CLS]
+            out = out[:, 0, :]
+        elif out.dim() > 2:
+            out = out.flatten(start_dim=1)
+        activations.append(out.detach().cpu())
+
+    handle = target_module.register_forward_hook(hook_fn)
+    with torch.no_grad():
+        for batch in dataloader:
+            inputs = batch[0].to(device) if isinstance(batch, (list, tuple)) else batch.to(device)
+            model(inputs)
+    handle.remove()
+    return torch.cat(activations, dim=0)
+
 
 def demo_cka(args, model_a, data_a, data_b):
     """Measure representation similarity between sentiment & news data."""
@@ -267,10 +366,10 @@ def demo_cka(args, model_a, data_a, data_b):
 
     for layer, label in zip(layer_names, layer_labels):
         try:
-            reps_a = extract_representations(model_a, val_a, layer,
-                                              device=str(DEVICE))
-            reps_b = extract_representations(model_a, val_b, layer,
-                                              device=str(DEVICE))
+            reps_a = _extract_cls_representations(model_a, val_a, layer,
+                                                   device=str(DEVICE))
+            reps_b = _extract_cls_representations(model_a, val_b, layer,
+                                                   device=str(DEVICE))
             cka = compute_cka(reps_a, reps_b)
             print(f"  {label:<30} {cka:>9.4f}")
         except Exception as e:
@@ -298,7 +397,7 @@ def demo_lora(args, tokenizer, data_a, pretrained_model):
     print("\n  [A] Full fine-tuning (all 66M params trainable)...")
     model_full = copy.deepcopy(pretrained_model).to(DEVICE)
     total_p = sum(p.numel() for p in model_full.parameters())
-    tracker_full = GPUCarbonTracker("full_ft", power_watts=30.0)
+    tracker_full = _make_tracker("full_ft")
     opt_full = torch.optim.AdamW(model_full.parameters(), lr=args.lr)
 
     tracker_full.start()
@@ -320,13 +419,14 @@ def demo_lora(args, tokenizer, data_a, pretrained_model):
         rank=args.lora_rank,
         alpha=args.lora_rank * 2,
     )
+    model_lora.to(DEVICE)  # LoRA layers created on CPU, move them to device
     lora_params = LoRAInjector.get_lora_parameters(model_lora)
     lora_trainable = LoRAInjector.count_lora_params(model_lora)
     print(f"    Injected into {n_injected} layers")
     print(f"    LoRA params: {lora_trainable:,} / {total_p:,} "
           f"({lora_trainable/total_p:.2%} of model)")
 
-    tracker_lora = GPUCarbonTracker("lora_ft", power_watts=30.0)
+    tracker_lora = _make_tracker("lora_ft")
     opt_lora = torch.optim.AdamW(lora_params, lr=args.lr * 5)
 
     tracker_lora.start()
@@ -350,7 +450,7 @@ def demo_lora(args, tokenizer, data_a, pretrained_model):
 
     # Carbon comparison
     print("\n  " + "-" * 60)
-    print("  Carbon Emissions Comparison")
+    print(f"  Carbon Emissions Comparison  (measured via {carbon_full['source']})")
     print("  " + "-" * 60)
     summary = compare_emissions([carbon_full, carbon_lora])
     comp = summary["comparisons"][0]
@@ -359,10 +459,20 @@ def demo_lora(args, tokenizer, data_a, pretrained_model):
     print(f"  {'Accuracy':>20} {result_full['accuracy']:>14.1%} "
           f"{result_lora['accuracy']:>14.1%}")
     print(f"  {'Time':>20} {full_time:>14.1f}s {lora_time:>14.1f}s")
+    print(f"  {'Avg GPU power':>20} {carbon_full['power_watts']:>13.0f}W "
+          f"{carbon_lora['power_watts']:>13.0f}W")
+    print(f"  {'Energy (kWh)':>20} {carbon_full['kwh']:>14.2e} "
+          f"{carbon_lora['kwh']:>14.2e}")
     print(f"  {'CO2 (kg)':>20} {carbon_full['co2_kg']:>14.2e} "
           f"{carbon_lora['co2_kg']:>14.2e}")
     print(f"  {'CO2 saved':>20} {'baseline':>15} {comp['co2_saved_pct']:>13.1f}%")
 
+    _carbon_log.extend([carbon_full, carbon_lora])
+    _summary_rows.append(("Phase 3", "Full Fine-tune", "SST-2",
+                           result_full['accuracy'], f"{total_p:,} params"))
+    _summary_rows.append(("Phase 3", "LoRA (rank={})".format(args.lora_rank),
+                           "SST-2", result_lora['accuracy'],
+                           f"{lora_trainable:,} params ({lora_trainable/total_p:.2%})"))
     return model_lora, carbon_full, carbon_lora
 
 
@@ -403,6 +513,8 @@ def demo_ewc(args, pretrained_model, data_a, data_b):
 
     # Fine-tune on Task B WITHOUT EWC
     print("\n  [A] Fine-tuning on news WITHOUT EWC...")
+    tracker_no_ewc = _make_tracker("ewc_baseline")
+    tracker_no_ewc.start()
     opt = torch.optim.AdamW(model_no_ewc.parameters(), lr=args.lr)
     for ep in range(args.epochs):
         loss = train_epoch(model_no_ewc, train_b, criterion, opt,
@@ -411,10 +523,13 @@ def demo_ewc(args, pretrained_model, data_a, data_b):
             r = evaluate(model_no_ewc, val_b, criterion, device=str(DEVICE))
             print(f"      epoch {ep+1}/{args.epochs}  loss={loss:.4f}  "
                   f"news_acc={r['accuracy']:.1%}")
+    carbon_no_ewc = tracker_no_ewc.stop()
     result_no_ewc = evaluate(model_no_ewc, val_b, criterion, device=str(DEVICE))
 
     # Fine-tune on Task B WITH EWC
     print(f"\n  [B] Fine-tuning on news WITH EWC (lambda=500)...")
+    tracker_ewc = _make_tracker("ewc_transfer")
+    tracker_ewc.start()
     ewc_loss = EWCLoss(source_model, fisher, lambda_=500.0).to(DEVICE)
     opt = torch.optim.AdamW(model_ewc.parameters(), lr=args.lr)
     for ep in range(args.epochs):
@@ -434,7 +549,9 @@ def demo_ewc(args, pretrained_model, data_a, data_b):
             r = evaluate(model_ewc, val_b, criterion, device=str(DEVICE))
             print(f"      epoch {ep+1}/{args.epochs}  loss={avg_loss:.4f}  "
                   f"news_acc={r['accuracy']:.1%}")
+    carbon_ewc = tracker_ewc.stop()
     result_ewc = evaluate(model_ewc, val_b, criterion, device=str(DEVICE))
+    _carbon_log.extend([carbon_no_ewc, carbon_ewc])
 
     # Measure backbone drift from pretrained (backbone only — heads differ)
     print("\n  Backbone parameter drift from pretrained:")
@@ -473,6 +590,10 @@ def demo_ewc(args, pretrained_model, data_a, data_b):
         reduction = (1.0 - avg_drift_ewc / avg_drift_no) * 100
         print(f"\n    EWC reduced backbone drift by {reduction:.0f}%")
 
+    _summary_rows.append(("Phase 4", "Baseline (no EWC)", "AG News",
+                           result_no_ewc['accuracy'], f"drift={avg_drift_no:.4f}"))
+    _summary_rows.append(("Phase 4", "EWC Transfer (λ=500)", "AG News",
+                           result_ewc['accuracy'], f"drift={avg_drift_ewc:.4f}"))
     return model_no_ewc, model_ewc
 
 
@@ -518,6 +639,8 @@ def demo_progressive(args, pretrained_model, data_b):
 
     result = evaluate(base_model, val_b, criterion, device=str(DEVICE))
     print(f"\n  Final news accuracy: {result['accuracy']:.1%}")
+    _summary_rows.append(("Phase 5", "Progressive Unfreezing", "AG News",
+                           result['accuracy'], f"{len(groups)} layer groups"))
     return model
 
 
@@ -613,6 +736,14 @@ def demo_merging(args, pretrained_model, data_b):
     for name, r in merge_results.items():
         print(f"  {name:.<20} {r['accuracy']:>11.1%}")
 
+    _summary_rows.append(("Phase 6", "Variant 1", "AG News",
+                           r1['accuracy'], f"lr={args.lr:.0e}"))
+    _summary_rows.append(("Phase 6", "Variant 2", "AG News",
+                           r2['accuracy'], f"lr={lr2:.0e}"))
+    for name, r in merge_results.items():
+        _summary_rows.append(("Phase 6", f"Merge: {name}", "AG News",
+                               r['accuracy'], ""))
+
     return model_v1, model_v2
 
 
@@ -636,6 +767,7 @@ def demo_lora_flow(args, pretrained_model, data_b):
     load_backbone_state_dict(model_l1, get_backbone_state_dict(pretrained_model))
     LoRAInjector.inject(model_l1, target_modules=target_modules,
                          rank=args.lora_rank, alpha=args.lora_rank * 2)
+    model_l1.to(DEVICE)  # LoRA layers created on CPU, move to device
     opt1 = torch.optim.AdamW(LoRAInjector.get_lora_parameters(model_l1),
                               lr=args.lr * 5)
     for ep in range(args.epochs):
@@ -650,6 +782,7 @@ def demo_lora_flow(args, pretrained_model, data_b):
     load_backbone_state_dict(model_l2, get_backbone_state_dict(pretrained_model))
     LoRAInjector.inject(model_l2, target_modules=target_modules,
                          rank=args.lora_rank, alpha=args.lora_rank * 2)
+    model_l2.to(DEVICE)  # LoRA layers created on CPU, move to device
     opt2 = torch.optim.AdamW(LoRAInjector.get_lora_parameters(model_l2),
                               lr=args.lr * 2)
     for ep in range(args.epochs):
@@ -667,6 +800,7 @@ def demo_lora_flow(args, pretrained_model, data_b):
     load_backbone_state_dict(soup_model, get_backbone_state_dict(pretrained_model))
     LoRAInjector.inject(soup_model, target_modules=target_modules,
                          rank=args.lora_rank, alpha=args.lora_rank * 2)
+    soup_model.to(DEVICE)  # LoRA layers created on CPU, move to device
     current_sd = soup_model.state_dict()
     for k, v in merged_lora.items():
         if k in current_sd:
@@ -733,6 +867,16 @@ def demo_lora_flow(args, pretrained_model, data_b):
     print(f"  {'LoRA Soup':.<20} {r_soup['accuracy']:>11.1%}")
     print(f"  {'LoRA-Flow':.<20} {flow_acc:>11.1%}")
 
+    lora_p = LoRAInjector.count_lora_params(model_l1)
+    _summary_rows.append(("Phase 7", "LoRA Adapter 1", "AG News",
+                           r1['accuracy'], f"{lora_p:,} params"))
+    _summary_rows.append(("Phase 7", "LoRA Adapter 2", "AG News",
+                           r2['accuracy'], f"{lora_p:,} params"))
+    _summary_rows.append(("Phase 7", "LoRA Soup", "AG News",
+                           r_soup['accuracy'], "uniform avg"))
+    _summary_rows.append(("Phase 7", "LoRA-Flow", "AG News",
+                           flow_acc, "learned gating"))
+
 
 # ═══════════════════════════════════════════════════════════════════
 # Main
@@ -759,8 +903,11 @@ def main():
     print("  DistilBERT (66M params) + SST-2 Sentiment + AG News Topics")
     print("  From-scratch PyTorch (no PEFT, no HuggingFace Trainer)")
     print("=" * 72)
-    print(f"  device={DEVICE}  seed={args.seed}  epochs={args.epochs}  "
-          f"lr={args.lr}  lora_rank={args.lora_rank}  samples={args.max_samples}")
+    print(f"  device={DEVICE}  GPU={GPU_NAME}  power={GPU_POWER_WATTS:.0f}W")
+    print(f"  seed={args.seed}  epochs={args.epochs}  lr={args.lr}  "
+          f"lora_rank={args.lora_rank}  samples={args.max_samples}")
+    _carbon_log.clear()
+    _summary_rows.clear()
 
     set_seed(args.seed)
 
@@ -814,6 +961,88 @@ def main():
 
     if args.demo == "all" or args.demo == "lora_flow":
         demo_lora_flow(args, pretrained, data_b)
+
+    # ─── CO2 Summary ───
+    if _carbon_log:
+        print("\n" + "=" * 72)
+        print("  Carbon Emissions Summary")
+        print("=" * 72)
+        total_co2 = sum(r['co2_kg'] for r in _carbon_log)
+        total_kwh = sum(r['kwh'] for r in _carbon_log)
+        total_time = sum(r['time_s'] for r in _carbon_log)
+        print(f"\n  {'Phase':<25} {'Time':>8} {'Energy':>12} {'CO2':>12} {'Source':>10}")
+        print("  " + "-" * 69)
+        for r in _carbon_log:
+            print(f"  {r['method']:<25} {r['time_s']:>7.1f}s "
+                  f"{r['kwh']:>11.2e} {r['co2_kg']:>11.2e} {r['source']:>10}")
+        print("  " + "-" * 69)
+        print(f"  {'TOTAL':<25} {total_time:>7.1f}s "
+              f"{total_kwh:>11.2e} {total_co2:>11.2e}")
+        print(f"\n  GPU: {GPU_NAME}  Power: {GPU_POWER_WATTS:.0f}W  "
+              f"Carbon intensity: 0.45 kg/kWh (US avg)")
+
+        # Real-world equivalence for this run
+        co2_g = total_co2 * 1000
+        if co2_g > 0:
+            phone_charges = co2_g / 8.22     # ~8.22g CO2 per phone charge
+            km_driven = co2_g / 121          # ~121g CO2 per km (avg car)
+            google_searches = co2_g / 0.2    # ~0.2g CO2 per Google search
+            led_hours = co2_g / 5.0          # ~5g CO2 per hour of LED bulb
+            streaming_min = co2_g / 0.6      # ~36g/hr = 0.6g/min streaming
+            print(f"\n  This run's footprint ({total_time:.0f}s):")
+            print(f"    {total_co2:.2e} kg CO2 = {phone_charges:.2f} phone charges")
+            print(f"    = {google_searches:.0f} Google searches"
+                  f"  = {led_hours:.1f} hrs LED lighting"
+                  f"  = {streaming_min:.1f} min video streaming")
+
+        # Projected savings: LoRA vs full fine-tuning at scale
+        co2_full = [r for r in _carbon_log if r['method'] in ('full_ft',)]
+        co2_lora = [r for r in _carbon_log if r['method'] == 'lora_ft']
+        if co2_full and co2_lora:
+            saved_per_task = co2_full[0]['co2_kg'] - co2_lora[0]['co2_kg']
+            if saved_per_task > 0:
+                N = 10000
+                total_saved_kg = saved_per_task * N
+                total_saved_g = total_saved_kg * 1000
+                p_phone = total_saved_g / 8.22
+                p_searches = total_saved_g / 0.2
+                p_led = total_saved_g / 5.0
+                p_stream = total_saved_g / 36.0   # 36g/hr streaming
+                p_km = total_saved_g / 121.0
+                print(f"\n  Projected across {N:,} training tasks (LoRA vs Full FT):")
+                print(f"    CO2 saved per task:  {saved_per_task:.2e} kg "
+                      f"({(saved_per_task/co2_full[0]['co2_kg'])*100:.1f}%)")
+                print(f"    Total CO2 saved:     {total_saved_kg:.4f} kg")
+                print(f"    = {p_phone:.0f} phone charges")
+                print(f"    = {p_searches:.0f} Google searches")
+                print(f"    = {p_led:.1f} hours of LED lighting")
+                print(f"    = {p_stream:.1f} hours of video streaming")
+                print(f"    = {p_km:.4f} km driven")
+
+    # ─── Final Summary Table ───
+    if _summary_rows:
+        print("\n" + "=" * 72)
+        print("  Final Results Summary — All Phases")
+        print("=" * 72)
+        print(f"\n  {'Phase':<10} {'Method':<28} {'Task':<10} "
+              f"{'Accuracy':>9}  {'Notes'}")
+        print("  " + "-" * 76)
+        prev_phase = None
+        for phase, method, task, acc, notes in _summary_rows:
+            if prev_phase and prev_phase != phase:
+                print("  " + "-" * 76)
+            prev_phase = phase
+            print(f"  {phase:<10} {method:<28} {task:<10} "
+                  f"{acc:>8.1%}   {notes}")
+        print("  " + "-" * 76)
+
+        # Best result per task
+        best_a = max((r for r in _summary_rows if r[2] == "SST-2"),
+                     key=lambda r: r[3], default=None)
+        best_b = max((r for r in _summary_rows if r[2] == "AG News"),
+                     key=lambda r: r[3], default=None)
+        print(f"\n  Best SST-2:   {best_a[1]} — {best_a[3]:.1%}" if best_a else "")
+        print(f"  Best AG News: {best_b[1]} — {best_b[3]:.1%}" if best_b else "")
 
     print("\n" + "=" * 72)
     print("  All LLM demo phases complete.")
