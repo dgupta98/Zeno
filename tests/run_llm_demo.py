@@ -9,7 +9,7 @@ This is the capstone demo: every Zeno DL component exercised on an
 actual LLM — proving our from-scratch library handles real transformers.
 
 Pipeline:
-  Phase 1: Fine-tune DistilBERT on sentiment analysis (SST-2)
+  Phase 1: Full fine-tune baselines on both tasks (SST-2 + AG News)
   Phase 2: CKA similarity between sentiment & news representations
   Phase 3: LoRA fine-tuning (Q/V projections, 99.7% param reduction)
   Phase 4: EWC transfer: sentiment → news without forgetting
@@ -260,39 +260,61 @@ def _make_tracker(label):
 # ═══════════════════════════════════════════════════════════════════
 
 def demo_finetune(args, tokenizer, data_a, data_b):
-    """Fine-tune DistilBERT on sentiment analysis with carbon tracking."""
+    """Fine-tune DistilBERT on both tasks to establish baselines."""
     print("\n" + "=" * 72)
-    print("  Phase 1: Fine-tune DistilBERT on Sentiment (SST-2)")
+    print("  Phase 1: Full Fine-tune Baselines (SST-2 + AG News)")
     print("=" * 72)
 
-    train_a, val_a = data_a
     criterion = nn.CrossEntropyLoss()
+    train_a, val_a = data_a
+    train_b, val_b = data_b
 
-    # Full fine-tuning with carbon tracking
-    print(f"\n  Loading {MODEL_NAME} (66M params)...")
+    # ── Task A: Sentiment (SST-2) ──
+    print(f"\n  [A] Fine-tuning on SST-2 Sentiment (2 classes)...")
     model = LLMClassifier(MODEL_NAME, num_labels=2).to(DEVICE)
     total_params = sum(p.numel() for p in model.parameters())
-    print(f"  Total parameters: {total_params:,}")
+    print(f"      {MODEL_NAME}: {total_params:,} params")
 
-    tracker = _make_tracker("full_finetune")
+    tracker_a = _make_tracker("ft_sentiment")
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
-    print(f"\n  Training for {args.epochs} epochs...")
     history = fine_tune(
         model, train_a, val_a,
         epochs=args.epochs, optimizer=optimizer, criterion=criterion,
-        carbon_tracker=tracker, verbose=True, device=str(DEVICE),
+        carbon_tracker=tracker_a, verbose=True, device=str(DEVICE),
     )
 
-    result = evaluate(model, val_a, criterion, device=str(DEVICE))
-    co2 = history['co2_result']
-    print(f"\n  Final sentiment accuracy: {result['accuracy']:.1%}")
-    print(f"  CO2: {co2['co2_kg']:.2e} kg  ({co2['source']} measurement, "
-          f"{co2['power_watts']:.0f}W avg)")
+    result_a = evaluate(model, val_a, criterion, device=str(DEVICE))
+    co2_a = history['co2_result']
+    print(f"      Sentiment accuracy: {result_a['accuracy']:.1%}")
 
-    _carbon_log.append(co2)
+    # ── Task B: AG News (4 classes) — the baseline for Phases 4–7 ──
+    print(f"\n  [B] Fine-tuning on AG News Topics (4 classes)...")
+    model_b = LLMClassifier(MODEL_NAME, num_labels=4).to(DEVICE)
+
+    tracker_b = _make_tracker("ft_news")
+    optimizer_b = torch.optim.AdamW(model_b.parameters(), lr=args.lr)
+
+    history_b = fine_tune(
+        model_b, train_b, val_b,
+        epochs=args.epochs, optimizer=optimizer_b, criterion=criterion,
+        carbon_tracker=tracker_b, verbose=True, device=str(DEVICE),
+    )
+
+    result_b = evaluate(model_b, val_b, criterion, device=str(DEVICE))
+    co2_b = history_b['co2_result']
+    print(f"      AG News accuracy: {result_b['accuracy']:.1%}")
+
+    # Summary
+    print(f"\n  CO2: sentiment={co2_a['co2_kg']:.2e} kg  "
+          f"news={co2_b['co2_kg']:.2e} kg  "
+          f"({co2_a['source']} measurement, {co2_a['power_watts']:.0f}W avg)")
+
+    _carbon_log.extend([co2_a, co2_b])
     _summary_rows.append(("Phase 1", "Full Fine-tune", "SST-2",
-                           result['accuracy'], f"{total_params:,} params"))
+                           result_a['accuracy'], f"{total_params:,} params"))
+    _summary_rows.append(("Phase 1", "Full Fine-tune (BASELINE)", "AG News",
+                           result_b['accuracy'], f"{total_params:,} params"))
     return model, history
 
 
@@ -339,45 +361,104 @@ def _extract_cls_representations(model, dataloader, layer_name, device="cpu"):
 
 
 def demo_cka(args, model_a, data_a, data_b):
-    """Measure representation similarity between sentiment & news data."""
+    """
+    Measure how much fine-tuning changes each layer's representations.
+
+    Standard CKA for transfer learning: pass the SAME inputs through a base
+    model and a fine-tuned model, compare representations at each layer.
+
+    High CKA = layer barely changed = universal features = safe to transfer.
+    Low CKA  = layer specialized for the task = needs adaptation.
+
+    This directly motivates which layers to freeze/transfer (Phase 5).
+    """
     print("\n" + "=" * 72)
-    print("  Phase 2: CKA Representation Similarity (Sentiment vs News)")
+    print("  Phase 2: CKA — How Much Does Fine-tuning Change Each Layer?")
     print("=" * 72)
 
     _, val_a = data_a
     _, val_b = data_b
 
-    # Key transformer layers to compare
+    # Full layer outputs — the complete contextualized representation at each depth
     layer_names = [
-        "transformer.transformer.layer.0.attention.q_lin",
-        "transformer.transformer.layer.2.attention.q_lin",
-        "transformer.transformer.layer.5.attention.q_lin",
-        "transformer.transformer.layer.5.ffn.lin2",
+        "transformer.transformer.layer.0.output_layer_norm",
+        "transformer.transformer.layer.1.output_layer_norm",
+        "transformer.transformer.layer.2.output_layer_norm",
+        "transformer.transformer.layer.3.output_layer_norm",
+        "transformer.transformer.layer.4.output_layer_norm",
+        "transformer.transformer.layer.5.output_layer_norm",
     ]
     layer_labels = [
-        "Layer 0 Q-proj (early)",
-        "Layer 2 Q-proj (middle)",
-        "Layer 5 Q-proj (late)",
-        "Layer 5 FFN-out (final)",
+        "Layer 0 (embeddings)",
+        "Layer 1 (early)",
+        "Layer 2 (early-mid)",
+        "Layer 3 (mid)",
+        "Layer 4 (deep)",
+        "Layer 5 (final)",
     ]
 
-    print(f"\n  {'Layer':<30} {'CKA Score':>10}")
-    print("  " + "-" * 42)
+    # Load a fresh base model for comparison
+    print(f"\n  Comparing base DistilBERT vs sentiment-fine-tuned model...")
+    base_model = LLMClassifier(MODEL_NAME, num_labels=2).to(DEVICE)
 
+    # ── A: Sentiment data (in-domain for fine-tuned model) ──
+    print(f"\n  [A] On Sentiment data (in-domain):")
+    print(f"      CKA(base, fine-tuned) — higher = layer unchanged by training")
+    print(f"  {'Layer':<25} {'CKA':>8} {'Interpretation'}")
+    print("  " + "-" * 60)
+
+    sentiment_ckas = []
     for layer, label in zip(layer_names, layer_labels):
         try:
-            reps_a = _extract_cls_representations(model_a, val_a, layer,
-                                                   device=str(DEVICE))
-            reps_b = _extract_cls_representations(model_a, val_b, layer,
-                                                   device=str(DEVICE))
-            cka = compute_cka(reps_a, reps_b)
-            print(f"  {label:<30} {cka:>9.4f}")
+            reps_base = _extract_cls_representations(base_model, val_a, layer,
+                                                      device=str(DEVICE))
+            reps_ft = _extract_cls_representations(model_a, val_a, layer,
+                                                    device=str(DEVICE))
+            cka = compute_cka(reps_base, reps_ft)
+            sentiment_ckas.append(cka)
+            interp = "universal" if cka > 0.8 else "shared" if cka > 0.5 else "task-specific"
+            bar = "█" * int(cka * 20) + "░" * (20 - int(cka * 20))
+            print(f"  {label:<25} {cka:>7.4f} {bar} {interp}")
         except Exception as e:
-            print(f"  {label:<30} {'error':>9} ({e})")
+            print(f"  {label:<25} {'error':>7} ({e})")
 
-    print("\n  Interpretation:")
-    print("    CKA ≈ 1.0: domains use similar representations (transfer likely helps)")
-    print("    CKA ≈ 0.0: domains use very different representations (transfer may hurt)")
+    # ── B: News data (out-of-domain — will the backbone transfer?) ──
+    print(f"\n  [B] On News data (out-of-domain):")
+    print(f"      CKA(base, fine-tuned) — high means fine-tuning didn't hurt")
+    print(f"  {'Layer':<25} {'CKA':>8} {'Interpretation'}")
+    print("  " + "-" * 60)
+
+    news_ckas = []
+    for layer, label in zip(layer_names, layer_labels):
+        try:
+            reps_base = _extract_cls_representations(base_model, val_b, layer,
+                                                      device=str(DEVICE))
+            reps_ft = _extract_cls_representations(model_a, val_b, layer,
+                                                    device=str(DEVICE))
+            cka = compute_cka(reps_base, reps_ft)
+            news_ckas.append(cka)
+            interp = "safe to transfer" if cka > 0.8 else "transferable" if cka > 0.5 else "needs adaptation"
+            bar = "█" * int(cka * 20) + "░" * (20 - int(cka * 20))
+            print(f"  {label:<25} {cka:>7.4f} {bar} {interp}")
+        except Exception as e:
+            print(f"  {label:<25} {'error':>7} ({e})")
+
+    del base_model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    # Summary
+    avg_sent = np.mean(sentiment_ckas) if sentiment_ckas else 0
+    avg_news = np.mean(news_ckas) if news_ckas else 0
+    print(f"\n  Average CKA — sentiment: {avg_sent:.4f}  news: {avg_news:.4f}")
+    if sentiment_ckas and news_ckas:
+        print(f"  Early layers (0-2): {np.mean(sentiment_ckas[:3]):.4f} sent / "
+              f"{np.mean(news_ckas[:3]):.4f} news  → mostly preserved")
+        print(f"  Late layers  (3-5): {np.mean(sentiment_ckas[3:]):.4f} sent / "
+              f"{np.mean(news_ckas[3:]):.4f} news  → more specialized")
+    print("\n  Key insight: early layers retain universal features (high CKA),")
+    print("  making them ideal for transfer. Late layers specialize — hence")
+    print("  EWC (Phase 4) and progressive unfreezing (Phase 5).")
 
 
 # ═══════════════════════════════════════════════════════════════════
