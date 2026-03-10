@@ -50,6 +50,7 @@ from libraries.dl.ewc import compute_fisher_diagonal, EWCLoss
 from libraries.dl.negative_transfer import (
     compute_cka, NegativeTransferMonitor, compute_representation_mmd,
 )
+from libraries.negative_transfer import compute_mmd
 from libraries.dl.carbon import GPUCarbonTracker
 from libraries.dl.train import train_epoch, evaluate, fine_tune
 from libraries.dl.merging import (
@@ -470,6 +471,10 @@ def demo_cka(args, model_a, data_a, data_b):
         except Exception as e:
             print(f"  {label:<25} {'error':>7} ({e})")
 
+    # Free intermediate tensors before next batch of extractions
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     # ── B: News data (out-of-domain — will the backbone transfer?) ──
     print(f"\n  [B] On News data (out-of-domain):")
     print(f"      CKA(base, fine-tuned) — high means fine-tuning didn't hurt")
@@ -491,14 +496,37 @@ def demo_cka(args, model_a, data_a, data_b):
         except Exception as e:
             print(f"  {label:<25} {'error':>7} ({e})")
 
+    # Free GPU memory before MMD computation
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     # ── C: Representation MMD (domain divergence in learned features) ──
+    # NOTE: We use CLS-pooled representations (768-dim) rather than the library's
+    # compute_representation_mmd which flattens to (N, seq_len*hidden) = (N, 98304).
+    # The RBF kernel's median heuristic creates an (N_total, N_total, d) intermediate
+    # array — with 98K dims and 1000+ samples that's hundreds of GB → instant OOM.
+    # CLS pooling gives the same semantic signal in a tractable 768-dim space.
+    # We also cap samples to 200/domain since the kernel still creates N²×d arrays.
+    MAX_MMD_SAMPLES = 200
     print(f"\n  [C] Representation MMD — domain divergence in learned features:")
     print(f"      MMD measures how different sentiment vs news data look inside")
     print(f"      the model's layers. High MMD = domains far apart = risk.")
+    print(f"      (Using [CLS]-pooled representations, capped at {MAX_MMD_SAMPLES} samples/domain)")
     mmd_layer = "transformer.transformer.layer.5.output_layer_norm"
     try:
-        mmd_val = compute_representation_mmd(
-            model_a, val_a, val_b, mmd_layer, device=str(DEVICE))
+        # Extract CLS-pooled representations (768-dim, not 98K-dim)
+        reps_a = _extract_cls_representations(model_a, val_a, mmd_layer,
+                                               device=str(DEVICE))
+        reps_b = _extract_cls_representations(model_a, val_b, mmd_layer,
+                                               device=str(DEVICE))
+        # Subsample to cap memory: RBF kernel creates (n_a+n_b, n_a+n_b, d) array
+        if reps_a.shape[0] > MAX_MMD_SAMPLES:
+            idx = torch.randperm(reps_a.shape[0])[:MAX_MMD_SAMPLES]
+            reps_a = reps_a[idx]
+        if reps_b.shape[0] > MAX_MMD_SAMPLES:
+            idx = torch.randperm(reps_b.shape[0])[:MAX_MMD_SAMPLES]
+            reps_b = reps_b[idx]
+        mmd_val = compute_mmd(reps_a.numpy(), reps_b.numpy())
         print(f"      MMD(sentiment, news) at final layer: {mmd_val:.6f}")
         if mmd_val < 0.05:
             print(f"      → Low divergence: domains similar in learned space — transfer is safe")
@@ -1217,7 +1245,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--lora_rank", type=int, default=4)
-    parser.add_argument("--max_samples", type=int, default=400)
+    parser.add_argument("--max_samples", type=int, default=2000)
     parser.add_argument("--quiet", action="store_true",
                         help="Suppress per-epoch output")
     args = parser.parse_args()
