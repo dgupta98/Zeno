@@ -10,9 +10,9 @@ actual LLM — proving our from-scratch library handles real transformers.
 
 Pipeline:
   Phase 1: Full fine-tune baselines on both tasks (SST-2 + AG News)
-  Phase 2: CKA similarity between sentiment & news representations
-  Phase 3: LoRA fine-tuning (Q/V projections, 99.7% param reduction)
-  Phase 4: EWC transfer: sentiment → news without forgetting
+  Phase 2: CKA similarity + representation MMD (negative transfer detection)
+  Phase 3: LoRA fine-tuning (Q/V projections, 99.9% param reduction)
+  Phase 4: EWC transfer + NegativeTransferMonitor: sentiment → news
   Phase 5: Progressive unfreezing on news classification
   Phase 6: Model merging (5 strategies on transformer backbone)
   Phase 7: LoRA Soups + LoRA-Flow (learned adapter gating)
@@ -47,7 +47,9 @@ from libraries.metrics import set_seed
 from libraries.dl.lora import LoRAInjector
 from libraries.dl.transfer import BaseModel, TransferScheduler
 from libraries.dl.ewc import compute_fisher_diagonal, EWCLoss
-from libraries.dl.negative_transfer import compute_cka
+from libraries.dl.negative_transfer import (
+    compute_cka, NegativeTransferMonitor, compute_representation_mmd,
+)
 from libraries.dl.carbon import GPUCarbonTracker
 from libraries.dl.train import train_epoch, evaluate, fine_tune
 from libraries.dl.merging import (
@@ -238,6 +240,8 @@ def _detect_gpu_power():
                 if key in name:
                     return float(watts), name
             return 70.0, name  # conservative default
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return 30.0, "Apple MPS"  # MPS fallback
     return 30.0, "CPU"  # CPU fallback
 
 
@@ -262,8 +266,12 @@ def _make_tracker(label):
 def demo_finetune(args, tokenizer, data_a, data_b):
     """Fine-tune DistilBERT on both tasks to establish baselines."""
     print("\n" + "=" * 72)
-    print("  Phase 1: Full Fine-tune Baselines (SST-2 + AG News)")
+    print("  Chapter 1: The Baselines")
+    print("  \"How well can DistilBERT learn each task from scratch?\"")
     print("=" * 72)
+    print("\n  We start with a pretrained DistilBERT — it understands English")
+    print("  grammar and word meaning, but knows nothing about our tasks.")
+    print("  Let's see how well it can learn each one with full fine-tuning.")
 
     criterion = nn.CrossEntropyLoss()
     train_a, val_a = data_a
@@ -275,7 +283,7 @@ def demo_finetune(args, tokenizer, data_a, data_b):
     total_params = sum(p.numel() for p in model.parameters())
     print(f"      {MODEL_NAME}: {total_params:,} params")
 
-    tracker_a = _make_tracker("ft_sentiment")
+    tracker_a = _make_tracker("Ch1: Sentiment FT")
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
     history = fine_tune(
@@ -291,8 +299,9 @@ def demo_finetune(args, tokenizer, data_a, data_b):
     # ── Task B: AG News (4 classes) — the baseline for Phases 4–7 ──
     print(f"\n  [B] Fine-tuning on AG News Topics (4 classes)...")
     model_b = LLMClassifier(MODEL_NAME, num_labels=4).to(DEVICE)
+    print(f"      {MODEL_NAME}: {total_params:,} params")
 
-    tracker_b = _make_tracker("ft_news")
+    tracker_b = _make_tracker("Ch1: News FT")
     optimizer_b = torch.optim.AdamW(model_b.parameters(), lr=args.lr)
 
     history_b = fine_tune(
@@ -306,6 +315,8 @@ def demo_finetune(args, tokenizer, data_a, data_b):
     print(f"      AG News accuracy: {result_b['accuracy']:.1%}")
 
     # Summary
+    print(f"\n  These are our baselines. Every transfer method must beat {result_b['accuracy']:.1%}")
+    print(f"  on AG News to prove it's worth the complexity.")
     print(f"\n  CO2: sentiment={co2_a['co2_kg']:.2e} kg  "
           f"news={co2_b['co2_kg']:.2e} kg  "
           f"({co2_a['source']} measurement, {co2_a['power_watts']:.0f}W avg)")
@@ -373,8 +384,13 @@ def demo_cka(args, model_a, data_a, data_b):
     This directly motivates which layers to freeze/transfer (Phase 5).
     """
     print("\n" + "=" * 72)
-    print("  Phase 2: CKA — How Much Does Fine-tuning Change Each Layer?")
+    print("  Chapter 2: The Diagnosis")
+    print("  \"Before we transfer — are these tasks even related?\"")
     print("=" * 72)
+    print("\n  If sentiment and news use completely different features inside")
+    print("  the model, transfer will hurt. CKA measures this: we pass the")
+    print("  same inputs through the base model and fine-tuned model, and")
+    print("  check how much each layer changed.")
 
     _, val_a = data_a
     _, val_b = data_b
@@ -443,6 +459,24 @@ def demo_cka(args, model_a, data_a, data_b):
         except Exception as e:
             print(f"  {label:<25} {'error':>7} ({e})")
 
+    # ── C: Representation MMD (domain divergence in learned features) ──
+    print(f"\n  [C] Representation MMD — domain divergence in learned features:")
+    print(f"      MMD measures how different sentiment vs news data look inside")
+    print(f"      the model's layers. High MMD = domains far apart = risk.")
+    mmd_layer = "transformer.transformer.layer.5.output_layer_norm"
+    try:
+        mmd_val = compute_representation_mmd(
+            model_a, val_a, val_b, mmd_layer, device=str(DEVICE))
+        print(f"      MMD(sentiment, news) at final layer: {mmd_val:.6f}")
+        if mmd_val < 0.05:
+            print(f"      → Low divergence: domains similar in learned space — transfer is safe")
+        elif mmd_val < 0.5:
+            print(f"      → Moderate divergence: transfer should help but monitor for issues")
+        else:
+            print(f"      → High divergence: domains differ significantly — proceed with caution")
+    except Exception as e:
+        print(f"      MMD computation error: {e}")
+
     del base_model
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -468,17 +502,21 @@ def demo_cka(args, model_a, data_a, data_b):
 def demo_lora(args, tokenizer, data_a, pretrained_model):
     """Compare full fine-tuning vs LoRA on sentiment analysis."""
     print("\n" + "=" * 72)
-    print("  Phase 3: LoRA Fine-tuning — Parameter-Efficient LLM Adaptation")
+    print("  Chapter 3: The Efficient Path")
+    print("  \"Can we adapt a 66M-parameter model by training only 0.1%?\"")
     print("=" * 72)
+    print("\n  Full fine-tuning updates all 66M parameters — expensive. LoRA")
+    print("  freezes the model and injects tiny trainable matrices into the")
+    print("  attention layers. Same model, 900x fewer trainable parameters.")
 
     train_a, val_a = data_a
     criterion = nn.CrossEntropyLoss()
 
-    # Full fine-tuning baseline
+    # Full fine-tuning baseline (fresh model — same starting point as LoRA)
     print("\n  [A] Full fine-tuning (all 66M params trainable)...")
-    model_full = copy.deepcopy(pretrained_model).to(DEVICE)
+    model_full = LLMClassifier(MODEL_NAME, num_labels=2).to(DEVICE)
     total_p = sum(p.numel() for p in model_full.parameters())
-    tracker_full = _make_tracker("full_ft")
+    tracker_full = _make_tracker("Ch3: Full FT")
     opt_full = torch.optim.AdamW(model_full.parameters(), lr=args.lr)
 
     tracker_full.start()
@@ -491,9 +529,9 @@ def demo_lora(args, tokenizer, data_a, pretrained_model):
     print(f"    Accuracy: {result_full['accuracy']:.1%}  "
           f"Time: {full_time:.1f}s  Params: {total_p:,}")
 
-    # LoRA fine-tuning
+    # LoRA fine-tuning (same fresh model — only LoRA params trained)
     print(f"\n  [B] LoRA fine-tuning (rank={args.lora_rank}, Q/V projections)...")
-    model_lora = copy.deepcopy(pretrained_model).to(DEVICE)
+    model_lora = LLMClassifier(MODEL_NAME, num_labels=2).to(DEVICE)
     n_injected = LoRAInjector.inject(
         model_lora,
         target_modules=["q_lin", "v_lin"],  # DistilBERT attention Q and V
@@ -507,7 +545,7 @@ def demo_lora(args, tokenizer, data_a, pretrained_model):
     print(f"    LoRA params: {lora_trainable:,} / {total_p:,} "
           f"({lora_trainable/total_p:.2%} of model)")
 
-    tracker_lora = _make_tracker("lora_ft")
+    tracker_lora = _make_tracker("Ch3: LoRA FT")
     opt_lora = torch.optim.AdamW(lora_params, lr=args.lr * 5)
 
     tracker_lora.start()
@@ -564,8 +602,13 @@ def demo_lora(args, tokenizer, data_a, pretrained_model):
 def demo_ewc(args, pretrained_model, data_a, data_b):
     """Transfer from sentiment to news with EWC to prevent forgetting."""
     print("\n" + "=" * 72)
-    print("  Phase 4: EWC Transfer — Sentiment → News Without Forgetting")
+    print("  Chapter 4: The Transfer")
+    print("  \"Can sentiment knowledge help with news classification?\"")
     print("=" * 72)
+    print("\n  We take the sentiment model's backbone and attach a new 4-class")
+    print("  head for news. EWC adds a penalty that protects the parameters")
+    print("  most important for sentiment — so the model learns news without")
+    print("  forgetting what it already knows.")
 
     train_a, val_a = data_a
     train_b, val_b = data_b
@@ -592,27 +635,38 @@ def demo_ewc(args, pretrained_model, data_a, data_b):
     model_no_ewc = model_no_ewc.to(DEVICE)
     model_ewc = copy.deepcopy(model_no_ewc).to(DEVICE)
 
+    # Initialize Negative Transfer Monitors (captures initial parameter state)
+    monitor_no = NegativeTransferMonitor(reference_model=model_no_ewc, patience=2)
+    monitor_ewc = NegativeTransferMonitor(reference_model=model_ewc, patience=2)
+    print(f"    NegativeTransferMonitor initialized (patience=2 epochs)")
+
     # Fine-tune on Task B WITHOUT EWC
     print("\n  [A] Fine-tuning on news WITHOUT EWC...")
-    tracker_no_ewc = _make_tracker("ewc_baseline")
+    tracker_no_ewc = _make_tracker("Ch4: No EWC")
     tracker_no_ewc.start()
     opt = torch.optim.AdamW(model_no_ewc.parameters(), lr=args.lr)
+    warnings_no = []
     for ep in range(args.epochs):
         loss = train_epoch(model_no_ewc, train_b, criterion, opt,
                            device=str(DEVICE))
+        r = evaluate(model_no_ewc, val_b, criterion, device=str(DEVICE))
+        warning = monitor_no.check(ep, r['loss'], model_no_ewc)
         if not args.quiet:
-            r = evaluate(model_no_ewc, val_b, criterion, device=str(DEVICE))
             print(f"      epoch {ep+1}/{args.epochs}  loss={loss:.4f}  "
                   f"news_acc={r['accuracy']:.1%}")
+        if warning:
+            warnings_no.append(warning)
+            print(f"      >>> {warning}")
     carbon_no_ewc = tracker_no_ewc.stop()
     result_no_ewc = evaluate(model_no_ewc, val_b, criterion, device=str(DEVICE))
 
     # Fine-tune on Task B WITH EWC
     print(f"\n  [B] Fine-tuning on news WITH EWC (lambda=500)...")
-    tracker_ewc = _make_tracker("ewc_transfer")
+    tracker_ewc = _make_tracker("Ch4: With EWC")
     tracker_ewc.start()
     ewc_loss = EWCLoss(source_model, fisher, lambda_=500.0).to(DEVICE)
     opt = torch.optim.AdamW(model_ewc.parameters(), lr=args.lr)
+    warnings_ewc = []
     for ep in range(args.epochs):
         model_ewc.train()
         total_loss = 0.0
@@ -626,38 +680,45 @@ def demo_ewc(args, pretrained_model, data_a, data_b):
             total_loss += loss.item()
             n_batches += 1
         avg_loss = total_loss / max(n_batches, 1)
+        r = evaluate(model_ewc, val_b, criterion, device=str(DEVICE))
+        warning = monitor_ewc.check(ep, r['loss'], model_ewc)
         if not args.quiet:
-            r = evaluate(model_ewc, val_b, criterion, device=str(DEVICE))
             print(f"      epoch {ep+1}/{args.epochs}  loss={avg_loss:.4f}  "
                   f"news_acc={r['accuracy']:.1%}")
+        if warning:
+            warnings_ewc.append(warning)
+            print(f"      >>> {warning}")
     carbon_ewc = tracker_ewc.stop()
     result_ewc = evaluate(model_ewc, val_b, criterion, device=str(DEVICE))
     _carbon_log.extend([carbon_no_ewc, carbon_ewc])
 
-    # Measure backbone drift from pretrained (backbone only — heads differ)
-    print("\n  Backbone parameter drift from pretrained:")
-    ref_params = {
-        name: param.data.clone().cpu()
-        for name, param in pretrained_model.named_parameters()
-        if not name.startswith("classifier.")
-    }
+    # Negative Transfer Monitor Report
+    print("\n  Negative Transfer Monitor Report:")
+    print(f"    Tracked {len(monitor_no.history)} epochs per model")
+    if not warnings_no and not warnings_ewc:
+        print(f"    No negative transfer detected in either model (good!)")
+        print(f"    Both models improved over their baselines within patience window")
+    else:
+        if warnings_no:
+            print(f"    WARNING: Negative transfer in no-EWC model ({len(warnings_no)}x)")
+        if warnings_ewc:
+            print(f"    WARNING: Negative transfer in EWC model ({len(warnings_ewc)}x)")
 
-    def backbone_drift(model):
-        drift = {}
-        for name, param in model.named_parameters():
-            if name in ref_params:
-                ref = ref_params[name].to(param.device)
-                drift[name] = float(torch.norm(param.data - ref).item())
-        return drift
+    # Parameter drift from initial state (via NegativeTransferMonitor)
+    print("\n  Backbone parameter drift (via NegativeTransferMonitor.parameter_drift):")
+    drift_full_no = monitor_no.parameter_drift(model_no_ewc)
+    drift_full_ewc = monitor_ewc.parameter_drift(model_ewc)
 
-    drift_no_ewc = backbone_drift(model_no_ewc)
-    drift_ewc = backbone_drift(model_ewc)
+    # Filter to backbone only for comparison
+    drift_no_ewc = {k: v for k, v in drift_full_no.items()
+                    if not k.startswith("classifier.")}
+    drift_ewc = {k: v for k, v in drift_full_ewc.items()
+                 if not k.startswith("classifier.")}
 
-    # Average drift
     avg_drift_no = np.mean(list(drift_no_ewc.values()))
     avg_drift_ewc = np.mean(list(drift_ewc.values()))
-    print(f"    Without EWC: avg drift = {avg_drift_no:.4f}")
-    print(f"    With EWC:    avg drift = {avg_drift_ewc:.4f}")
+    print(f"    Without EWC: avg backbone drift = {avg_drift_no:.4f}")
+    print(f"    With EWC:    avg backbone drift = {avg_drift_ewc:.4f}")
 
     # Summary
     print("\n  " + "-" * 60)
@@ -670,6 +731,10 @@ def demo_ewc(args, pretrained_model, data_a, data_b):
     if avg_drift_ewc < avg_drift_no:
         reduction = (1.0 - avg_drift_ewc / avg_drift_no) * 100
         print(f"\n    EWC reduced backbone drift by {reduction:.0f}%")
+    else:
+        print(f"\n    Note: EWC constrains important parameters selectively, not")
+        print(f"    all parameters. Average drift can be similar while the most")
+        print(f"    critical weights are protected — accuracy tells the story.")
 
     _summary_rows.append(("Phase 4", "Baseline (no EWC)", "AG News",
                            result_no_ewc['accuracy'], f"drift={avg_drift_no:.4f}"))
@@ -685,8 +750,12 @@ def demo_ewc(args, pretrained_model, data_a, data_b):
 def demo_progressive(args, pretrained_model, data_b):
     """Progressive unfreezing with discriminative LRs on news task."""
     print("\n" + "=" * 72)
-    print("  Phase 5: Progressive Unfreezing on News Classification")
+    print("  Chapter 5: The Careful Approach")
+    print("  \"What if we unfreeze the model gradually instead of all at once?\"")
     print("=" * 72)
+    print("\n  Instead of training everything from the start (risky — random")
+    print("  classifier gradients can corrupt pretrained features), we first")
+    print("  train only the classifier head, then unfreeze the backbone.")
 
     train_b, val_b = data_b
     criterion = nn.CrossEntropyLoss()
@@ -732,8 +801,12 @@ def demo_progressive(args, pretrained_model, data_b):
 def demo_merging(args, pretrained_model, data_b):
     """Merge two fine-tuned LLM backbones using 5 strategies."""
     print("\n" + "=" * 72)
-    print("  Phase 6: Model Merging — Combining LLM Experts in Weight Space")
+    print("  Chapter 6: The Ensemble (Without the Cost)")
+    print("  \"Two models trained differently — can we combine their strengths?\"")
     print("=" * 72)
+    print("\n  Traditional ensembles run multiple models at inference (2x cost).")
+    print("  Model merging combines weights directly — one model with the")
+    print("  knowledge of both. Zero extra cost at inference.")
 
     train_b, val_b = data_b
     criterion = nn.CrossEntropyLoss()
@@ -835,8 +908,12 @@ def demo_merging(args, pretrained_model, data_b):
 def demo_lora_flow(args, pretrained_model, data_b):
     """Merge LoRA adapters and learn dynamic gating."""
     print("\n" + "=" * 72)
-    print("  Phase 7: LoRA Soups + LoRA-Flow (Learned Adapter Gating)")
+    print("  Chapter 7: The Smart Blend")
+    print("  \"Can we merge lightweight LoRA adapters — and learn how?\"")
     print("=" * 72)
+    print("\n  Instead of merging full 66M-param models, we merge just the")
+    print("  tiny LoRA adapters. Naive averaging often fails. LoRA-Flow")
+    print("  learns to dynamically weight adapters based on each input.")
 
     train_b, val_b = data_b
     criterion = nn.CrossEntropyLoss()
@@ -980,7 +1057,8 @@ def main():
     args = parser.parse_args()
 
     print("=" * 72)
-    print("  Zeno v0.5.0 — Real-World LLM Transfer Learning Demo")
+    print("  Zeno v0.5.0 — A Transfer Learning Story")
+    print("  \"One model, two tasks, seven ways to learn\"")
     print("  DistilBERT (66M params) + SST-2 Sentiment + AG News Topics")
     print("  From-scratch PyTorch (no PEFT, no HuggingFace Trainer)")
     print("=" * 72)
@@ -1046,7 +1124,8 @@ def main():
     # ─── CO2 Summary ───
     if _carbon_log:
         print("\n" + "=" * 72)
-        print("  Carbon Emissions Summary")
+        print("  Epilogue: The Environmental Cost")
+        print("  \"How much CO2 did all this learning produce?\"")
         print("=" * 72)
         total_co2 = sum(r['co2_kg'] for r in _carbon_log)
         total_kwh = sum(r['kwh'] for r in _carbon_log)
@@ -1077,8 +1156,8 @@ def main():
                   f"  = {streaming_min:.1f} min video streaming")
 
         # Projected savings: LoRA vs full fine-tuning at scale
-        co2_full = [r for r in _carbon_log if r['method'] in ('full_ft',)]
-        co2_lora = [r for r in _carbon_log if r['method'] == 'lora_ft']
+        co2_full = [r for r in _carbon_log if 'Full FT' in r['method']]
+        co2_lora = [r for r in _carbon_log if 'LoRA FT' in r['method']]
         if co2_full and co2_lora:
             saved_per_task = co2_full[0]['co2_kg'] - co2_lora[0]['co2_kg']
             if saved_per_task > 0:
@@ -1094,7 +1173,7 @@ def main():
                 print(f"    CO2 saved per task:  {saved_per_task:.2e} kg "
                       f"({(saved_per_task/co2_full[0]['co2_kg'])*100:.1f}%)")
                 print(f"    Total CO2 saved:     {total_saved_kg:.4f} kg")
-                print(f"    = {p_phone:.0f} phone charges")
+                print(f"    = {p_phone:.0f} phone charge{'s' if p_phone != 1 else ''}")
                 print(f"    = {p_searches:.0f} Google searches")
                 print(f"    = {p_led:.1f} hours of LED lighting")
                 print(f"    = {p_stream:.1f} hours of video streaming")
@@ -1103,7 +1182,7 @@ def main():
     # ─── Final Summary Table ───
     if _summary_rows:
         print("\n" + "=" * 72)
-        print("  Final Results Summary — All Phases")
+        print("  The Full Story — Results Across All Chapters")
         print("=" * 72)
         print(f"\n  {'Phase':<10} {'Method':<28} {'Task':<10} "
               f"{'Accuracy':>9}  {'Notes'}")
@@ -1125,9 +1204,26 @@ def main():
         print(f"\n  Best SST-2:   {best_a[1]} — {best_a[3]:.1%}" if best_a else "")
         print(f"  Best AG News: {best_b[1]} — {best_b[3]:.1%}" if best_b else "")
 
+    # ─── Story Conclusion ───
     print("\n" + "=" * 72)
-    print("  All LLM demo phases complete.")
-    print("  Every Zeno DL component validated on a real pretrained LLM.")
+    print("  The Moral of the Story")
+    print("=" * 72)
+    if _summary_rows:
+        baseline_b = [r for r in _summary_rows
+                      if "BASELINE" in r[1] and r[2] == "AG News"]
+        best_b = max((r for r in _summary_rows if r[2] == "AG News"),
+                     key=lambda r: r[3], default=None)
+        if baseline_b and best_b:
+            base_acc = baseline_b[0][3]
+            gain = (best_b[3] - base_acc) * 100
+            print(f"\n  Starting point:  {base_acc:.1%} (full fine-tune from scratch)")
+            print(f"  Best result:     {best_b[3]:.1%} ({best_b[1]})")
+            print(f"  Improvement:     +{gain:.1f} percentage points through transfer learning")
+    print(f"\n  A pretrained model that knows English can learn new tasks faster")
+    print(f"  and better by reusing what it already knows — if you're smart")
+    print(f"  about how you do it. That's transfer learning.")
+    print(f"\n  Every technique in this demo was built from scratch in Zeno —")
+    print(f"  no PEFT, no HuggingFace Trainer, just PyTorch and our library.")
     print("=" * 72)
 
 
