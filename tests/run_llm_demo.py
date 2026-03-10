@@ -156,9 +156,13 @@ def load_backbone_state_dict(model, backbone_sd):
 # ═══════════════════════════════════════════════════════════════════
 
 def load_and_tokenize(dataset_name, tokenizer, max_samples=400,
-                      max_length=64, seed=42):
+                      max_length=None, seed=42):
     """
     Load a HuggingFace dataset, tokenize, and pack into tensors.
+
+    Shuffles the dataset before slicing to avoid class-ordering bias
+    (e.g. AG News is ordered by class — taking [:N] without shuffle
+    would yield only class 0 samples).
 
     Returns:
         packed: (N, 2, max_length) float tensor
@@ -168,10 +172,16 @@ def load_and_tokenize(dataset_name, tokenizer, max_samples=400,
 
     if dataset_name == "sst2":
         ds = load_dataset("stanfordnlp/sst2", split="train")
+        ds = ds.shuffle(seed=seed)
+        if max_length is None:
+            max_length = 64  # SST-2 sentences are short
         texts = ds["sentence"][:max_samples]
         labels = ds["label"][:max_samples]
     elif dataset_name == "ag_news":
         ds = load_dataset("fancyzhx/ag_news", split="train")
+        ds = ds.shuffle(seed=seed)
+        if max_length is None:
+            max_length = 128  # AG News articles need more tokens
         texts = ds["text"][:max_samples]
         labels = ds["label"][:max_samples]
     else:
@@ -194,14 +204,29 @@ def load_and_tokenize(dataset_name, tokenizer, max_samples=400,
 
 
 def make_loaders(packed, labels, batch_size=32, val_frac=0.2, seed=42):
-    """Split into train/val DataLoaders."""
+    """Split into train/val DataLoaders with stratified sampling."""
     torch.manual_seed(seed)
     n = len(packed)
     n_val = int(n * val_frac)
-    idx = torch.randperm(n)
 
-    train_ds = TensorDataset(packed[idx[n_val:]], labels[idx[n_val:]])
-    val_ds = TensorDataset(packed[idx[:n_val]], labels[idx[:n_val]])
+    # Stratified split: ensure each class is proportionally represented
+    unique_labels = labels.unique()
+    train_indices = []
+    val_indices = []
+    for lbl in unique_labels:
+        lbl_idx = (labels == lbl).nonzero(as_tuple=True)[0]
+        perm = lbl_idx[torch.randperm(len(lbl_idx))]
+        n_val_lbl = max(1, int(len(perm) * val_frac))
+        val_indices.append(perm[:n_val_lbl])
+        train_indices.append(perm[n_val_lbl:])
+    train_idx = torch.cat(train_indices)
+    val_idx = torch.cat(val_indices)
+    # Shuffle within splits
+    train_idx = train_idx[torch.randperm(len(train_idx))]
+    val_idx = val_idx[torch.randperm(len(val_idx))]
+
+    train_ds = TensorDataset(packed[train_idx], labels[train_idx])
+    val_ds = TensorDataset(packed[val_idx], labels[val_idx])
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=batch_size)
@@ -326,7 +351,12 @@ def demo_finetune(args, tokenizer, data_a, data_b):
                            result_a['accuracy'], f"{total_params:,} params"))
     _summary_rows.append(("Phase 1", "Full Fine-tune (BASELINE)", "AG News",
                            result_b['accuracy'], f"{total_params:,} params"))
-    return model, history
+    return model, model_b, {
+        'sst2': {'result': result_a, 'carbon': co2_a,
+                 'time': co2_a.get('time_s', 0)},
+        'ag_news': {'result': result_b, 'carbon': co2_b,
+                    'time': co2_b.get('time_s', 0)},
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -414,6 +444,8 @@ def demo_cka(args, model_a, data_a, data_b):
     ]
 
     # Load a fresh base model for comparison
+    # Note: num_labels doesn't matter for CKA — we only extract hidden states
+    # before the classifier head. Using num_labels=2 to match the fine-tuned model.
     print(f"\n  Comparing base DistilBERT vs sentiment-fine-tuned model...")
     base_model = LLMClassifier(MODEL_NAME, num_labels=2).to(DEVICE)
 
@@ -499,7 +531,7 @@ def demo_cka(args, model_a, data_a, data_b):
 # Phase 3: LoRA Fine-tuning
 # ═══════════════════════════════════════════════════════════════════
 
-def demo_lora(args, tokenizer, data_a, pretrained_model):
+def demo_lora(args, tokenizer, data_a, pretrained_model, phase1_result=None):
     """Compare full fine-tuning vs LoRA on sentiment analysis."""
     print("\n" + "=" * 72)
     print("  Chapter 3: The Efficient Path")
@@ -512,22 +544,30 @@ def demo_lora(args, tokenizer, data_a, pretrained_model):
     train_a, val_a = data_a
     criterion = nn.CrossEntropyLoss()
 
-    # Full fine-tuning baseline (fresh model — same starting point as LoRA)
-    print("\n  [A] Full fine-tuning (all 66M params trainable)...")
-    model_full = LLMClassifier(MODEL_NAME, num_labels=2).to(DEVICE)
-    total_p = sum(p.numel() for p in model_full.parameters())
-    tracker_full = _make_tracker("Ch3: Full FT")
-    opt_full = torch.optim.AdamW(model_full.parameters(), lr=args.lr)
+    # Full fine-tuning baseline — reuse Phase 1 result if available
+    total_p = sum(p.numel() for p in pretrained_model.parameters())
+    if phase1_result is not None:
+        print("\n  [A] Full fine-tuning baseline (reusing Phase 1 SST-2 result)...")
+        result_full = phase1_result['result']
+        carbon_full = phase1_result['carbon']
+        full_time = phase1_result['time']
+        print(f"    Accuracy: {result_full['accuracy']:.1%}  "
+              f"Time: {full_time:.1f}s  Params: {total_p:,}  (from Phase 1)")
+    else:
+        print("\n  [A] Full fine-tuning (all 66M params trainable)...")
+        model_full = LLMClassifier(MODEL_NAME, num_labels=2).to(DEVICE)
+        tracker_full = _make_tracker("Ch3: Full FT")
+        opt_full = torch.optim.AdamW(model_full.parameters(), lr=args.lr)
 
-    tracker_full.start()
-    t0 = time.time()
-    for ep in range(args.epochs):
-        train_epoch(model_full, train_a, criterion, opt_full, device=str(DEVICE))
-    full_time = time.time() - t0
-    carbon_full = tracker_full.stop()
-    result_full = evaluate(model_full, val_a, criterion, device=str(DEVICE))
-    print(f"    Accuracy: {result_full['accuracy']:.1%}  "
-          f"Time: {full_time:.1f}s  Params: {total_p:,}")
+        tracker_full.start()
+        t0 = time.time()
+        for ep in range(args.epochs):
+            train_epoch(model_full, train_a, criterion, opt_full, device=str(DEVICE))
+        full_time = time.time() - t0
+        carbon_full = tracker_full.stop()
+        result_full = evaluate(model_full, val_a, criterion, device=str(DEVICE))
+        print(f"    Accuracy: {result_full['accuracy']:.1%}  "
+              f"Time: {full_time:.1f}s  Params: {total_p:,}")
 
     # LoRA fine-tuning (same fresh model — only LoRA params trained)
     print(f"\n  [B] LoRA fine-tuning (rank={args.lora_rank}, Q/V projections)...")
@@ -540,17 +580,23 @@ def demo_lora(args, tokenizer, data_a, pretrained_model):
     )
     model_lora.to(DEVICE)  # LoRA layers created on CPU, move them to device
     lora_params = LoRAInjector.get_lora_parameters(model_lora)
+    # Include classifier head — it's freshly initialized and MUST be trained
+    classifier_params = list(model_lora.classifier.parameters())
+    all_trainable = list(lora_params) + classifier_params
     lora_trainable = LoRAInjector.count_lora_params(model_lora)
+    clf_trainable = sum(p.numel() for p in classifier_params)
     print(f"    Injected into {n_injected} layers")
-    print(f"    LoRA params: {lora_trainable:,} / {total_p:,} "
-          f"({lora_trainable/total_p:.2%} of model)")
+    print(f"    LoRA params: {lora_trainable:,} + classifier: {clf_trainable:,} "
+          f"= {lora_trainable + clf_trainable:,} / {total_p:,} "
+          f"({(lora_trainable + clf_trainable)/total_p:.2%} of model)")
 
     tracker_lora = _make_tracker("Ch3: LoRA FT")
-    opt_lora = torch.optim.AdamW(lora_params, lr=args.lr * 5)
+    opt_lora = torch.optim.AdamW(all_trainable, lr=args.lr * 15)
 
+    lora_epochs = max(args.epochs, 5)  # LoRA needs more epochs with fewer params
     tracker_lora.start()
     t0 = time.time()
-    for ep in range(args.epochs):
+    for ep in range(lora_epochs):
         train_epoch(model_lora, train_a, criterion, opt_lora, device=str(DEVICE))
     lora_time = time.time() - t0
     carbon_lora = tracker_lora.stop()
@@ -586,12 +632,16 @@ def demo_lora(args, tokenizer, data_a, pretrained_model):
           f"{carbon_lora['co2_kg']:>14.2e}")
     print(f"  {'CO2 saved':>20} {'baseline':>15} {comp['co2_saved_pct']:>13.1f}%")
 
-    _carbon_log.extend([carbon_full, carbon_lora])
-    _summary_rows.append(("Phase 3", "Full Fine-tune", "SST-2",
+    if phase1_result is None:
+        _carbon_log.extend([carbon_full, carbon_lora])
+    else:
+        _carbon_log.append(carbon_lora)
+    _summary_rows.append(("Phase 3", "Full Fine-tune (=Phase 1)", "SST-2",
                            result_full['accuracy'], f"{total_p:,} params"))
     _summary_rows.append(("Phase 3", "LoRA (rank={})".format(args.lora_rank),
                            "SST-2", result_lora['accuracy'],
-                           f"{lora_trainable:,} params ({lora_trainable/total_p:.2%})"))
+                           f"{lora_trainable + clf_trainable:,} trainable, "
+                           f"{lora_epochs} epochs"))
     return model_lora, carbon_full, carbon_lora
 
 
@@ -635,10 +685,21 @@ def demo_ewc(args, pretrained_model, data_a, data_b):
     model_no_ewc = model_no_ewc.to(DEVICE)
     model_ewc = copy.deepcopy(model_no_ewc).to(DEVICE)
 
-    # Initialize Negative Transfer Monitors (captures initial parameter state)
-    monitor_no = NegativeTransferMonitor(reference_model=model_no_ewc, patience=2)
-    monitor_ewc = NegativeTransferMonitor(reference_model=model_ewc, patience=2)
-    print(f"    NegativeTransferMonitor initialized (patience=2 epochs)")
+    # Compute pre-training baseline val loss for true negative transfer detection
+    pre_train_result = evaluate(model_no_ewc, val_b, criterion, device=str(DEVICE))
+    baseline_val_loss = pre_train_result['loss']
+    print(f"    Pre-training baseline val_loss: {baseline_val_loss:.4f} "
+          f"(acc={pre_train_result['accuracy']:.1%})")
+
+    # Initialize Negative Transfer Monitors with true baseline
+    monitor_no = NegativeTransferMonitor(
+        reference_model=model_no_ewc, patience=2,
+        baseline_val_loss=baseline_val_loss)
+    monitor_ewc = NegativeTransferMonitor(
+        reference_model=model_ewc, patience=2,
+        baseline_val_loss=baseline_val_loss)
+    print(f"    NegativeTransferMonitor initialized (patience=2, "
+          f"baseline_loss={baseline_val_loss:.4f})")
 
     # Fine-tune on Task B WITHOUT EWC
     print("\n  [A] Fine-tuning on news WITHOUT EWC...")
@@ -747,6 +808,42 @@ def demo_ewc(args, pretrained_model, data_a, data_b):
 # Phase 5: Progressive Unfreezing
 # ═══════════════════════════════════════════════════════════════════
 
+def _get_distilbert_layer_groups(model):
+    """
+    Build granular layer groups for DistilBERT progressive unfreezing.
+
+    BaseModel.get_layer_groups() uses named_children() which gives only
+    2 groups (transformer, classifier) — unfreezing jumps from head-only
+    to everything in one step. This function splits the transformer into
+    its individual layers for true gradual unfreezing:
+
+        [0] embeddings       — word/position embeddings (shallowest)
+        [1] layer_0           — transformer block 0
+        ...
+        [6] layer_5           — transformer block 5
+        [7] classifier        — task head (deepest, unfrozen first)
+    """
+    groups = []
+
+    # Embeddings
+    embed_params = list(model.transformer.embeddings.parameters())
+    if embed_params:
+        groups.append(("embeddings", embed_params))
+
+    # Individual transformer layers (DistilBERT has 6)
+    for i, layer in enumerate(model.transformer.transformer.layer):
+        params = list(layer.parameters())
+        if params:
+            groups.append((f"layer_{i}", params))
+
+    # Classifier head
+    clf_params = list(model.classifier.parameters())
+    if clf_params:
+        groups.append(("classifier", clf_params))
+
+    return groups
+
+
 def demo_progressive(args, pretrained_model, data_b):
     """Progressive unfreezing with discriminative LRs on news task."""
     print("\n" + "=" * 72)
@@ -755,7 +852,8 @@ def demo_progressive(args, pretrained_model, data_b):
     print("=" * 72)
     print("\n  Instead of training everything from the start (risky — random")
     print("  classifier gradients can corrupt pretrained features), we first")
-    print("  train only the classifier head, then unfreeze the backbone.")
+    print("  train only the classifier head, then gradually unfreeze deeper")
+    print("  layers one at a time — each with a smaller learning rate.")
 
     train_b, val_b = data_b
     criterion = nn.CrossEntropyLoss()
@@ -764,33 +862,53 @@ def demo_progressive(args, pretrained_model, data_b):
     load_backbone_state_dict(model, get_backbone_state_dict(pretrained_model))
     model = model.to(DEVICE)
 
+    # Use granular layer groups (8 groups instead of 2)
     base_model = BaseModel(model)
-    groups = base_model.get_layer_groups()
-    print(f"\n  Layer groups: {len(groups)}")
+    groups = _get_distilbert_layer_groups(model)
+    print(f"\n  Layer groups: {len(groups)} (embeddings + 6 transformer layers + classifier)")
     for i, (name, params) in enumerate(groups):
         n_p = sum(p.numel() for p in params)
         print(f"    [{i}] {name}: {n_p:,} params")
 
+    # Use enough epochs to see gradual unfreezing
+    prog_epochs = max(args.epochs, len(groups))
     scheduler = TransferScheduler(groups, base_lr=args.lr, decay=2.6)
 
-    print(f"\n  Training with progressive unfreezing...")
-    for ep in range(args.epochs):
+    tracker_prog = _make_tracker("Ch5: Progressive Unfreeze")
+    tracker_prog.start()
+    print(f"\n  Training with progressive unfreezing ({prog_epochs} epochs)...")
+    print(f"  Epoch 0: classifier only → each epoch unfreezes the next deeper layer")
+
+    prev_unfrozen = scheduler._unfrozen_up_to
+    opt = scheduler.build_optimizer()
+    for ep in range(prog_epochs):
         scheduler.step(ep)
-        opt = scheduler.build_optimizer()
+        # Only rebuild optimizer when new parameters are unfrozen
+        if scheduler._unfrozen_up_to != prev_unfrozen:
+            # Preserve existing optimizer state where possible
+            opt = scheduler.build_optimizer()
+            prev_unfrozen = scheduler._unfrozen_up_to
         loss = train_epoch(base_model, train_b, criterion, opt,
                            device=str(DEVICE))
         if not args.quiet:
             r = evaluate(base_model, val_b, criterion, device=str(DEVICE))
             unfrozen = sum(1 for _, ps in groups for p in ps if p.requires_grad)
             total_tensors = sum(1 for _, ps in groups for _ in ps)
-            print(f"      epoch {ep+1}/{args.epochs}  loss={loss:.4f}  "
+            # Show which groups are unfrozen
+            unfrozen_names = [name for name, ps in groups
+                              if any(p.requires_grad for p in ps)]
+            print(f"      epoch {ep+1}/{prog_epochs}  loss={loss:.4f}  "
                   f"acc={r['accuracy']:.1%}  "
-                  f"unfrozen={unfrozen}/{total_tensors} param tensors")
+                  f"unfrozen={unfrozen}/{total_tensors}  "
+                  f"[{', '.join(unfrozen_names)}]")
 
+    carbon_prog = tracker_prog.stop()
+    _carbon_log.append(carbon_prog)
     result = evaluate(base_model, val_b, criterion, device=str(DEVICE))
     print(f"\n  Final news accuracy: {result['accuracy']:.1%}")
     _summary_rows.append(("Phase 5", "Progressive Unfreezing", "AG News",
-                           result['accuracy'], f"{len(groups)} layer groups"))
+                           result['accuracy'],
+                           f"{len(groups)} groups, {prog_epochs} epochs"))
     return model
 
 
@@ -802,33 +920,47 @@ def demo_merging(args, pretrained_model, data_b):
     """Merge two fine-tuned LLM backbones using 5 strategies."""
     print("\n" + "=" * 72)
     print("  Chapter 6: The Ensemble (Without the Cost)")
-    print("  \"Two models trained differently — can we combine their strengths?\"")
+    print("  \"Two models trained on different data — can we combine their strengths?\"")
     print("=" * 72)
     print("\n  Traditional ensembles run multiple models at inference (2x cost).")
     print("  Model merging combines weights directly — one model with the")
     print("  knowledge of both. Zero extra cost at inference.")
+    print("\n  We train two variants on different halves of the data (model soups")
+    print("  style), then merge their backbones with 5 strategies.")
 
     train_b, val_b = data_b
     criterion = nn.CrossEntropyLoss()
 
-    # Train variant 1 (lower LR)
-    print("\n  Training variant 1 (lr={:.0e})...".format(args.lr))
+    # Split training data into two halves for genuinely different views
+    all_data = list(train_b.dataset)
+    mid = len(all_data) // 2
+    split1 = torch.utils.data.DataLoader(
+        torch.utils.data.Subset(train_b.dataset, range(0, mid)),
+        batch_size=train_b.batch_size, shuffle=True)
+    split2 = torch.utils.data.DataLoader(
+        torch.utils.data.Subset(train_b.dataset, range(mid, len(all_data))),
+        batch_size=train_b.batch_size, shuffle=True)
+
+    tracker_merge = _make_tracker("Ch6: Model Merging")
+    tracker_merge.start()
+
+    # Train variant 1 (first half of data)
+    print(f"\n  Training variant 1 (data split A, lr={args.lr:.0e})...")
     model_v1 = LLMClassifier(MODEL_NAME, num_labels=4).to(DEVICE)
     load_backbone_state_dict(model_v1, get_backbone_state_dict(pretrained_model))
     opt_v1 = torch.optim.AdamW(model_v1.parameters(), lr=args.lr)
     for ep in range(args.epochs):
-        train_epoch(model_v1, train_b, criterion, opt_v1, device=str(DEVICE))
+        train_epoch(model_v1, split1, criterion, opt_v1, device=str(DEVICE))
     r1 = evaluate(model_v1, val_b, criterion, device=str(DEVICE))
     print(f"    Accuracy: {r1['accuracy']:.1%}")
 
-    # Train variant 2 (higher LR)
-    lr2 = args.lr * 3
-    print(f"\n  Training variant 2 (lr={lr2:.0e})...")
+    # Train variant 2 (second half of data)
+    print(f"\n  Training variant 2 (data split B, lr={args.lr:.0e})...")
     model_v2 = LLMClassifier(MODEL_NAME, num_labels=4).to(DEVICE)
     load_backbone_state_dict(model_v2, get_backbone_state_dict(pretrained_model))
-    opt_v2 = torch.optim.AdamW(model_v2.parameters(), lr=lr2)
+    opt_v2 = torch.optim.AdamW(model_v2.parameters(), lr=args.lr)
     for ep in range(args.epochs):
-        train_epoch(model_v2, train_b, criterion, opt_v2, device=str(DEVICE))
+        train_epoch(model_v2, split2, criterion, opt_v2, device=str(DEVICE))
     r2 = evaluate(model_v2, val_b, criterion, device=str(DEVICE))
     print(f"    Accuracy: {r2['accuracy']:.1%}")
 
@@ -851,15 +983,24 @@ def demo_merging(args, pretrained_model, data_b):
           f"mean_mag={stats_v2['mean_magnitude']:.6f}")
     print(f"    Cosine similarity: {sim:.4f}")
 
+    # Average classifier heads from both variants for fair merging
+    avg_clf_sd = {}
+    for k in model_v1.classifier.state_dict():
+        avg_clf_sd[k] = (model_v1.classifier.state_dict()[k] +
+                         model_v2.classifier.state_dict()[k]) / 2.0
+
     # Merge strategies
     print("\n  Merging with 5 strategies...")
+    print("  (classifier head: averaged from both variants)")
     merge_results = {}
 
+    # Reuse a single model shell to avoid loading pretrained weights 5 times
+    _merge_shell = LLMClassifier(MODEL_NAME, num_labels=4).to(DEVICE)
+
     def eval_merged(merged_sd, name):
-        merged = LLMClassifier(MODEL_NAME, num_labels=4).to(DEVICE)
-        load_backbone_state_dict(merged, merged_sd)
-        merged.classifier.load_state_dict(model_v1.classifier.state_dict())
-        r = evaluate(merged, val_b, criterion, device=str(DEVICE))
+        load_backbone_state_dict(_merge_shell, merged_sd)
+        _merge_shell.classifier.load_state_dict(avg_clf_sd)
+        r = evaluate(_merge_shell, val_b, criterion, device=str(DEVICE))
         merge_results[name] = r
         print(f"    {name:<15} accuracy: {r['accuracy']:.1%}")
 
@@ -890,13 +1031,16 @@ def demo_merging(args, pretrained_model, data_b):
     for name, r in merge_results.items():
         print(f"  {name:.<20} {r['accuracy']:>11.1%}")
 
-    _summary_rows.append(("Phase 6", "Variant 1", "AG News",
-                           r1['accuracy'], f"lr={args.lr:.0e}"))
-    _summary_rows.append(("Phase 6", "Variant 2", "AG News",
-                           r2['accuracy'], f"lr={lr2:.0e}"))
+    carbon_merge = tracker_merge.stop()
+    _carbon_log.append(carbon_merge)
+
+    _summary_rows.append(("Phase 6", "Variant 1 (split A)", "AG News",
+                           r1['accuracy'], f"lr={args.lr:.0e}, half data"))
+    _summary_rows.append(("Phase 6", "Variant 2 (split B)", "AG News",
+                           r2['accuracy'], f"lr={args.lr:.0e}, half data"))
     for name, r in merge_results.items():
         _summary_rows.append(("Phase 6", f"Merge: {name}", "AG News",
-                               r['accuracy'], ""))
+                               r['accuracy'], "avg classifier"))
 
     return model_v1, model_v2
 
@@ -919,31 +1063,39 @@ def demo_lora_flow(args, pretrained_model, data_b):
     criterion = nn.CrossEntropyLoss()
     target_modules = ["q_lin", "v_lin"]
 
+    tracker_flow = _make_tracker("Ch7: LoRA Soup+Flow")
+    tracker_flow.start()
+
     # Train LoRA adapter 1
-    print(f"\n  Training LoRA adapter 1 (rank={args.lora_rank}, lr={args.lr*5:.0e})...")
+    print(f"\n  Training LoRA adapter 1 (rank={args.lora_rank}, lr={args.lr*15:.0e})...")
     model_l1 = LLMClassifier(MODEL_NAME, num_labels=4).to(DEVICE)
     load_backbone_state_dict(model_l1, get_backbone_state_dict(pretrained_model))
     LoRAInjector.inject(model_l1, target_modules=target_modules,
                          rank=args.lora_rank, alpha=args.lora_rank * 2)
     model_l1.to(DEVICE)  # LoRA layers created on CPU, move to device
-    opt1 = torch.optim.AdamW(LoRAInjector.get_lora_parameters(model_l1),
-                              lr=args.lr * 5)
-    for ep in range(args.epochs):
+    # Include classifier head — it's freshly initialized and MUST be trained
+    l1_trainable = list(LoRAInjector.get_lora_parameters(model_l1)) + \
+                   list(model_l1.classifier.parameters())
+    opt1 = torch.optim.AdamW(l1_trainable, lr=args.lr * 15)
+    lora_epochs = max(args.epochs, 5)  # LoRA needs more epochs with fewer params
+    for ep in range(lora_epochs):
         train_epoch(model_l1, train_b, criterion, opt1, device=str(DEVICE))
     r1 = evaluate(model_l1, val_b, criterion, device=str(DEVICE))
     print(f"    Adapter 1 accuracy: {r1['accuracy']:.1%}  "
           f"({LoRAInjector.count_lora_params(model_l1):,} LoRA params)")
 
-    # Train LoRA adapter 2 (different LR)
-    print(f"\n  Training LoRA adapter 2 (rank={args.lora_rank}, lr={args.lr*2:.0e})...")
+    # Train LoRA adapter 2 (different LR for diversity)
+    print(f"\n  Training LoRA adapter 2 (rank={args.lora_rank}, lr={args.lr*10:.0e})...")
     model_l2 = LLMClassifier(MODEL_NAME, num_labels=4).to(DEVICE)
     load_backbone_state_dict(model_l2, get_backbone_state_dict(pretrained_model))
     LoRAInjector.inject(model_l2, target_modules=target_modules,
                          rank=args.lora_rank, alpha=args.lora_rank * 2)
     model_l2.to(DEVICE)  # LoRA layers created on CPU, move to device
-    opt2 = torch.optim.AdamW(LoRAInjector.get_lora_parameters(model_l2),
-                              lr=args.lr * 2)
-    for ep in range(args.epochs):
+    # Include classifier head — it's freshly initialized and MUST be trained
+    l2_trainable = list(LoRAInjector.get_lora_parameters(model_l2)) + \
+                   list(model_l2.classifier.parameters())
+    opt2 = torch.optim.AdamW(l2_trainable, lr=args.lr * 10)
+    for ep in range(lora_epochs):
         train_epoch(model_l2, train_b, criterion, opt2, device=str(DEVICE))
     r2 = evaluate(model_l2, val_b, criterion, device=str(DEVICE))
     print(f"    Adapter 2 accuracy: {r2['accuracy']:.1%}")
@@ -964,8 +1116,12 @@ def demo_lora_flow(args, pretrained_model, data_b):
         if k in current_sd:
             current_sd[k] = v
     soup_model.load_state_dict(current_sd)
-    # Copy classifier from adapter 1
-    soup_model.classifier.load_state_dict(model_l1.classifier.state_dict())
+    # Average classifier heads from both adapters (not just adapter 1)
+    avg_soup_clf = {}
+    for k in model_l1.classifier.state_dict():
+        avg_soup_clf[k] = (model_l1.classifier.state_dict()[k] +
+                           model_l2.classifier.state_dict()[k]) / 2.0
+    soup_model.classifier.load_state_dict(avg_soup_clf)
     LoRAInjector.merge_all(soup_model)
 
     r_soup = evaluate(soup_model, val_b, criterion, device=str(DEVICE))
@@ -975,6 +1131,10 @@ def demo_lora_flow(args, pretrained_model, data_b):
     print("\n  LoRA-Flow: training learned gating weights...")
     hidden_size = 768  # distilbert hidden size
     flow = LoRAFlow(num_adapters=2, gate_input_dim=hidden_size).to(DEVICE)
+
+    # Use the base pretrained transformer (no LoRA) for neutral gate input
+    gate_backbone = copy.deepcopy(pretrained_model.transformer).to(DEVICE)
+    gate_backbone.eval()
 
     def adapter_outputs_fn(batch):
         x = batch[0].to(DEVICE)
@@ -986,7 +1146,8 @@ def demo_lora_flow(args, pretrained_model, data_b):
         input_ids = x[:, 0, :].long()
         attention_mask = x[:, 1, :].long()
         with torch.no_grad():
-            out = model_l1.transformer(
+            # Use base pretrained backbone (no LoRA) to avoid bias toward either adapter
+            out = gate_backbone(
                 input_ids=input_ids, attention_mask=attention_mask)
         return out.last_hidden_state[:, 0, :]
 
@@ -1025,11 +1186,16 @@ def demo_lora_flow(args, pretrained_model, data_b):
     print(f"  {'LoRA Soup':.<20} {r_soup['accuracy']:>11.1%}")
     print(f"  {'LoRA-Flow':.<20} {flow_acc:>11.1%}")
 
+    carbon_flow = tracker_flow.stop()
+    _carbon_log.append(carbon_flow)
+
     lora_p = LoRAInjector.count_lora_params(model_l1)
     _summary_rows.append(("Phase 7", "LoRA Adapter 1", "AG News",
-                           r1['accuracy'], f"{lora_p:,} params"))
+                           r1['accuracy'],
+                           f"{lora_p:,} LoRA + clf, {lora_epochs} epochs"))
     _summary_rows.append(("Phase 7", "LoRA Adapter 2", "AG News",
-                           r2['accuracy'], f"{lora_p:,} params"))
+                           r2['accuracy'],
+                           f"{lora_p:,} LoRA + clf, {lora_epochs} epochs"))
     _summary_rows.append(("Phase 7", "LoRA Soup", "AG News",
                            r_soup['accuracy'], "uniform avg"))
     _summary_rows.append(("Phase 7", "LoRA-Flow", "AG News",
@@ -1089,11 +1255,13 @@ def main():
     print(f"  Task B: {len(packed_b)} samples ({TASK_B_NAME})")
 
     # ─── Run phases ───
+    phase1_info = None
     if args.demo == "all" or args.demo == "finetune":
-        pretrained, _ = demo_finetune(args, tokenizer, data_a, data_b)
+        pretrained, _, phase1_info = demo_finetune(args, tokenizer, data_a, data_b)
     else:
         # Need a pretrained model for other phases
         print("\n  Quick-training base sentiment model...")
+        set_seed(args.seed)
         pretrained = LLMClassifier(MODEL_NAME, num_labels=2).to(DEVICE)
         opt = torch.optim.AdamW(pretrained.parameters(), lr=args.lr)
         criterion = nn.CrossEntropyLoss()
@@ -1104,21 +1272,29 @@ def main():
         print(f"  Base sentiment accuracy: {r['accuracy']:.1%}")
 
     if args.demo == "all" or args.demo == "cka":
+        set_seed(args.seed)
         demo_cka(args, pretrained, data_a, data_b)
 
     if args.demo == "all" or args.demo == "lora":
-        demo_lora(args, tokenizer, data_a, pretrained)
+        set_seed(args.seed)
+        # Reuse Phase 1 SST-2 result to avoid redundant full FT
+        p1_sst2 = phase1_info['sst2'] if phase1_info else None
+        demo_lora(args, tokenizer, data_a, pretrained, phase1_result=p1_sst2)
 
     if args.demo == "all" or args.demo == "ewc":
+        set_seed(args.seed)
         demo_ewc(args, pretrained, data_a, data_b)
 
     if args.demo == "all" or args.demo == "progressive":
+        set_seed(args.seed)
         demo_progressive(args, pretrained, data_b)
 
     if args.demo == "all" or args.demo == "merging":
+        set_seed(args.seed)
         demo_merging(args, pretrained, data_b)
 
     if args.demo == "all" or args.demo == "lora_flow":
+        set_seed(args.seed)
         demo_lora_flow(args, pretrained, data_b)
 
     # ─── CO2 Summary ───
@@ -1156,6 +1332,9 @@ def main():
                   f"  = {streaming_min:.1f} min video streaming")
 
         # Projected savings: LoRA vs full fine-tuning at scale
+        # NOTE: This is a hypothetical illustration based on this toy demo
+        # (small dataset, single task). Real-world savings vary greatly
+        # depending on model size, dataset size, and hardware.
         co2_full = [r for r in _carbon_log if 'Full FT' in r['method']]
         co2_lora = [r for r in _carbon_log if 'LoRA FT' in r['method']]
         if co2_full and co2_lora:
@@ -1169,7 +1348,10 @@ def main():
                 p_led = total_saved_g / 5.0
                 p_stream = total_saved_g / 36.0   # 36g/hr streaming
                 p_km = total_saved_g / 121.0
-                print(f"\n  Projected across {N:,} training tasks (LoRA vs Full FT):")
+                print(f"\n  Hypothetical projection across {N:,} training tasks "
+                      f"(LoRA vs Full FT):")
+                print(f"  ⚠ Illustrative only — based on this toy demo's "
+                      f"compute profile ({args.max_samples} samples)")
                 print(f"    CO2 saved per task:  {saved_per_task:.2e} kg "
                       f"({(saved_per_task/co2_full[0]['co2_kg'])*100:.1f}%)")
                 print(f"    Total CO2 saved:     {total_saved_kg:.4f} kg")
@@ -1218,7 +1400,13 @@ def main():
             gain = (best_b[3] - base_acc) * 100
             print(f"\n  Starting point:  {base_acc:.1%} (full fine-tune from scratch)")
             print(f"  Best result:     {best_b[3]:.1%} ({best_b[1]})")
-            print(f"  Improvement:     +{gain:.1f} percentage points through transfer learning")
+            if gain > 0:
+                print(f"  Improvement:     +{gain:.1f} pp via transfer/merging/LoRA")
+            else:
+                print(f"  Difference:      {gain:+.1f} pp (baseline was competitive)")
+    print(f"\n  Note: with only {args.max_samples} samples, accuracy differences of")
+    print(f"  <5 pp are within statistical noise. Results are illustrative, not")
+    print(f"  definitive — increase --max_samples for more stable comparisons.")
     print(f"\n  A pretrained model that knows English can learn new tasks faster")
     print(f"  and better by reusing what it already knows — if you're smart")
     print(f"  about how you do it. That's transfer learning.")
