@@ -29,6 +29,7 @@ Usage:
 """
 
 import argparse
+import gc
 import sys
 import os
 import copy
@@ -285,6 +286,18 @@ def _make_tracker(label):
     return GPUCarbonTracker(label, power_watts=GPU_POWER_WATTS)
 
 
+def _cleanup():
+    """Force garbage collection and free GPU cache.
+
+    Colab T4 has only 15 GB VRAM and ~12 GB system RAM.  Between phases
+    (and within them), we must aggressively reclaim memory so that
+    cumulative leaks don't OOM the runtime.
+    """
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Phase 1: Fine-tune on Sentiment + Carbon Tracking
 # ═══════════════════════════════════════════════════════════════════
@@ -322,6 +335,10 @@ def demo_finetune(args, tokenizer, data_a, data_b):
     co2_a = history['co2_result']
     print(f"      Sentiment accuracy: {result_a['accuracy']:.1%}")
 
+    # Free optimizer/history from Task A before allocating Task B model
+    del optimizer, history
+    _cleanup()
+
     # ── Task B: AG News (4 classes) — the baseline for Phases 4–7 ──
     print(f"\n  [B] Fine-tuning on AG News Topics (4 classes)...")
     model_b = LLMClassifier(MODEL_NAME, num_labels=4).to(DEVICE)
@@ -352,7 +369,12 @@ def demo_finetune(args, tokenizer, data_a, data_b):
                            result_a['accuracy'], f"{total_params:,} params"))
     _summary_rows.append(("Phase 1", "Full Fine-tune (BASELINE)", "AG News",
                            result_b['accuracy'], f"{total_params:,} params"))
-    return model, model_b, {
+
+    # model_b (AG News) is only needed for its accuracy baseline; release ~264 MB VRAM
+    del model_b, optimizer_b, history_b
+    _cleanup()
+
+    return model, {
         'sst2': {'result': result_a, 'carbon': co2_a,
                  'time': co2_a.get('time_s', 0)},
         'ag_news': {'result': result_b, 'carbon': co2_b,
@@ -596,6 +618,9 @@ def demo_lora(args, tokenizer, data_a, pretrained_model, phase1_result=None):
         result_full = evaluate(model_full, val_a, criterion, device=str(DEVICE))
         print(f"    Accuracy: {result_full['accuracy']:.1%}  "
               f"Time: {full_time:.1f}s  Params: {total_p:,}")
+        # Free full model before allocating LoRA model
+        del model_full, opt_full
+        _cleanup()
 
     # LoRA fine-tuning (same fresh model — only LoRA params trained)
     print(f"\n  [B] LoRA fine-tuning (rank={args.lora_rank}, Q/V projections)...")
@@ -670,7 +695,9 @@ def demo_lora(args, tokenizer, data_a, pretrained_model, phase1_result=None):
                            "SST-2", result_lora['accuracy'],
                            f"{lora_trainable + clf_trainable:,} trainable, "
                            f"{lora_epochs} epochs"))
-    return model_lora, carbon_full, carbon_lora
+
+    del model_lora, opt_lora
+    _cleanup()
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -699,11 +726,13 @@ def demo_ewc(args, pretrained_model, data_a, data_b):
     # Filter to backbone-only (exclude classifier — different shapes for Task B)
     fisher = {k: v for k, v in fisher_full.items()
               if not k.startswith("classifier.")}
+    del fisher_full  # free the unfiltered copy (~264 MB)
     n_fisher = sum(f.numel() for f in fisher.values())
     top_importance = max(f.max().item() for f in fisher.values())
     print(f"    Fisher over {n_fisher:,} backbone params")
     print(f"    Max importance: {top_importance:.6f}")
 
+    _cleanup()
     source_model = copy.deepcopy(pretrained_model).to(DEVICE)
 
     # Task B model: new 4-class head on pretrained backbone
@@ -748,6 +777,10 @@ def demo_ewc(args, pretrained_model, data_a, data_b):
             print(f"      >>> {warning}")
     carbon_no_ewc = tracker_no_ewc.stop()
     result_no_ewc = evaluate(model_no_ewc, val_b, criterion, device=str(DEVICE))
+
+    # Free no-EWC optimizer before allocating EWC optimizer
+    del opt
+    _cleanup()
 
     # Fine-tune on Task B WITH EWC
     print(f"\n  [B] Fine-tuning on news WITH EWC (lambda=500)...")
@@ -829,7 +862,11 @@ def demo_ewc(args, pretrained_model, data_a, data_b):
                            result_no_ewc['accuracy'], f"drift={avg_drift_no:.4f}"))
     _summary_rows.append(("Phase 4", "EWC Transfer (λ=500)", "AG News",
                            result_ewc['accuracy'], f"drift={avg_drift_ewc:.4f}"))
-    return model_no_ewc, model_ewc
+
+    # Free all EWC-specific objects — caller doesn't use returned models
+    del model_no_ewc, model_ewc, source_model, ewc_loss, fisher
+    del monitor_no, monitor_ewc
+    _cleanup()
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -937,7 +974,9 @@ def demo_progressive(args, pretrained_model, data_b):
     _summary_rows.append(("Phase 5", "Progressive Unfreezing", "AG News",
                            result['accuracy'],
                            f"{len(groups)} groups, {prog_epochs} epochs"))
-    return model
+
+    del model, base_model, opt, scheduler
+    _cleanup()
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -982,6 +1021,10 @@ def demo_merging(args, pretrained_model, data_b):
     r1 = evaluate(model_v1, val_b, criterion, device=str(DEVICE))
     print(f"    Accuracy: {r1['accuracy']:.1%}")
 
+    # Free v1's optimizer before allocating v2
+    del opt_v1
+    _cleanup()
+
     # Train variant 2 (second half of data)
     print(f"\n  Training variant 2 (data split B, lr={args.lr:.0e})...")
     model_v2 = LLMClassifier(MODEL_NAME, num_labels=4).to(DEVICE)
@@ -1016,6 +1059,10 @@ def demo_merging(args, pretrained_model, data_b):
     for k in model_v1.classifier.state_dict():
         avg_clf_sd[k] = (model_v1.classifier.state_dict()[k] +
                          model_v2.classifier.state_dict()[k]) / 2.0
+
+    # Free both variant models — we have their state dicts and classifier avg
+    del model_v1, model_v2, opt_v2
+    _cleanup()
 
     # Merge strategies
     print("\n  Merging with 5 strategies...")
@@ -1070,7 +1117,9 @@ def demo_merging(args, pretrained_model, data_b):
         _summary_rows.append(("Phase 6", f"Merge: {name}", "AG News",
                                r['accuracy'], "avg classifier"))
 
-    return model_v1, model_v2
+    # Free merge shell and state dicts
+    del _merge_shell, base_sd, sd_v1, sd_v2, tv_v1, tv_v2, avg_clf_sd
+    _cleanup()
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1109,8 +1158,13 @@ def demo_lora_flow(args, pretrained_model, data_b):
     for ep in range(lora_epochs):
         train_epoch(model_l1, train_b, criterion, opt1, device=str(DEVICE))
     r1 = evaluate(model_l1, val_b, criterion, device=str(DEVICE))
+    lora_p = LoRAInjector.count_lora_params(model_l1)
     print(f"    Adapter 1 accuracy: {r1['accuracy']:.1%}  "
-          f"({LoRAInjector.count_lora_params(model_l1):,} LoRA params)")
+          f"({lora_p:,} LoRA params)")
+
+    # Free adapter 1 optimizer before allocating adapter 2
+    del opt1, l1_trainable
+    _cleanup()
 
     # Train LoRA adapter 2 (different LR for diversity)
     print(f"\n  Training LoRA adapter 2 (rank={args.lora_rank}, lr={args.lr*10:.0e})...")
@@ -1127,6 +1181,10 @@ def demo_lora_flow(args, pretrained_model, data_b):
         train_epoch(model_l2, train_b, criterion, opt2, device=str(DEVICE))
     r2 = evaluate(model_l2, val_b, criterion, device=str(DEVICE))
     print(f"    Adapter 2 accuracy: {r2['accuracy']:.1%}")
+
+    # Free adapter 2 optimizer
+    del opt2, l2_trainable
+    _cleanup()
 
     # LoRA Soups: merge adapter weights
     print("\n  LoRA Soups: merging adapter weights...")
@@ -1154,6 +1212,10 @@ def demo_lora_flow(args, pretrained_model, data_b):
 
     r_soup = evaluate(soup_model, val_b, criterion, device=str(DEVICE))
     print(f"    LoRA Soup accuracy: {r_soup['accuracy']:.1%}")
+
+    # Free soup model — no longer needed
+    del soup_model, merged_lora, lora_sd_1, lora_sd_2, avg_soup_clf
+    _cleanup()
 
     # LoRA-Flow: learned gating
     print("\n  LoRA-Flow: training learned gating weights...")
@@ -1217,7 +1279,7 @@ def demo_lora_flow(args, pretrained_model, data_b):
     carbon_flow = tracker_flow.stop()
     _carbon_log.append(carbon_flow)
 
-    lora_p = LoRAInjector.count_lora_params(model_l1)
+    # lora_p was captured earlier when adapter 1 was created
     _summary_rows.append(("Phase 7", "LoRA Adapter 1", "AG News",
                            r1['accuracy'],
                            f"{lora_p:,} LoRA + clf, {lora_epochs} epochs"))
@@ -1228,6 +1290,10 @@ def demo_lora_flow(args, pretrained_model, data_b):
                            r_soup['accuracy'], "uniform avg"))
     _summary_rows.append(("Phase 7", "LoRA-Flow", "AG News",
                            flow_acc, "learned gating"))
+
+    # Free all Phase 7 models
+    del model_l1, model_l2, gate_backbone, flow
+    _cleanup()
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1273,19 +1339,25 @@ def main():
     packed_a, labels_a = load_and_tokenize(
         "sst2", tokenizer, max_samples=args.max_samples)
     data_a = make_loaders(packed_a, labels_a, seed=args.seed)
+    n_samples_a = len(packed_a)
 
     print(f"  Tokenizing {TASK_B_NAME}...")
     packed_b, labels_b = load_and_tokenize(
         "ag_news", tokenizer, max_samples=args.max_samples)
     data_b = make_loaders(packed_b, labels_b, seed=args.seed)
+    n_samples_b = len(packed_b)
 
-    print(f"  Task A: {len(packed_a)} samples ({TASK_A_NAME})")
-    print(f"  Task B: {len(packed_b)} samples ({TASK_B_NAME})")
+    print(f"  Task A: {n_samples_a} samples ({TASK_A_NAME})")
+    print(f"  Task B: {n_samples_b} samples ({TASK_B_NAME})")
+
+    # Free raw tensors — data is now inside DataLoader's TensorDataset copies
+    del packed_a, labels_a, packed_b, labels_b
+    _cleanup()
 
     # ─── Run phases ───
     phase1_info = None
     if args.demo == "all" or args.demo == "finetune":
-        pretrained, _, phase1_info = demo_finetune(args, tokenizer, data_a, data_b)
+        pretrained, phase1_info = demo_finetune(args, tokenizer, data_a, data_b)
     else:
         # Need a pretrained model for other phases
         print("\n  Quick-training base sentiment model...")
@@ -1298,32 +1370,40 @@ def main():
                         device=str(DEVICE))
         r = evaluate(pretrained, data_a[1], criterion, device=str(DEVICE))
         print(f"  Base sentiment accuracy: {r['accuracy']:.1%}")
+        del opt
+    _cleanup()
 
     if args.demo == "all" or args.demo == "cka":
         set_seed(args.seed)
         demo_cka(args, pretrained, data_a, data_b)
+        _cleanup()
 
     if args.demo == "all" or args.demo == "lora":
         set_seed(args.seed)
         # Reuse Phase 1 SST-2 result to avoid redundant full FT
         p1_sst2 = phase1_info['sst2'] if phase1_info else None
         demo_lora(args, tokenizer, data_a, pretrained, phase1_result=p1_sst2)
+        _cleanup()
 
     if args.demo == "all" or args.demo == "ewc":
         set_seed(args.seed)
         demo_ewc(args, pretrained, data_a, data_b)
+        _cleanup()
 
     if args.demo == "all" or args.demo == "progressive":
         set_seed(args.seed)
         demo_progressive(args, pretrained, data_b)
+        _cleanup()
 
     if args.demo == "all" or args.demo == "merging":
         set_seed(args.seed)
         demo_merging(args, pretrained, data_b)
+        _cleanup()
 
     if args.demo == "all" or args.demo == "lora_flow":
         set_seed(args.seed)
         demo_lora_flow(args, pretrained, data_b)
+        _cleanup()
 
     # ─── CO2 Summary ───
     if _carbon_log:
